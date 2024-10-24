@@ -15,6 +15,7 @@
 #include <sstream>            // String stream
 #include <filesystem>         // Filesystem
 #include <ctime>              // Timestamp
+#include <fcntl.h>            // File control
 #include <nlohmann/json.hpp>  // Parse JSON
 #include "include/terminal_utils.h"
 
@@ -263,6 +264,21 @@ int Socket::acceptConnection(std::string &clientIp)
     {
         clientIp = inet_ntoa(address.sin_addr); // Get client IP address
         Logger::getInstance()->success("New connection accepted from " + clientIp);
+
+        // Set the new socket to non-blocking mode
+        int flags = fcntl(new_socket, F_GETFL, 0); // Get the socket flags
+        if (flags == -1)
+        {
+            Logger::getInstance()->error("Failed to get socket flags");
+            close(new_socket);
+            return -1;
+        }
+        if (fcntl(new_socket, F_SETFL, flags | O_NONBLOCK) == -1) // Set the socket to non-blocking mode
+        {
+            Logger::getInstance()->error("Failed to set socket to non-blocking mode");
+            close(new_socket);
+            return -1;
+        }
     }
     else
     {
@@ -462,18 +478,23 @@ Server::Server(int port, const std::string &staticFolder, int threadCount)
 void Server::handleClient(int client_socket, const std::string &clientIp)
 {
     char buffer[1024] = {0};
-    ssize_t valread = read(client_socket, buffer, 1024);
-    if (valread < 0) // Check for read error
+    ssize_t valread = read(client_socket, buffer, 1024); // Read from the client socket
+    if (valread < 0)
     {
+        if (errno == EWOULDBLOCK || errno == EAGAIN) // Check if the read would block
+        {
+            Logger::getInstance()->warning("Non-blocking read would block", clientIp);
+            return;
+        }
         Logger::getInstance()->error("Failed to read from socket", clientIp);
         return;
     }
     std::string request(buffer);
-    std::string path = Http::getRequestPath(request);
+    std::string path = Http::getRequestPath(request); // Extract the path from the request
 
     Logger::getInstance()->info("Received request for path: " + path, clientIp);
 
-    router.route(path, client_socket, clientIp);
+    router.route(path, client_socket, clientIp); // Route the request
 }
 
 void Server::start()
@@ -515,7 +536,6 @@ void Server::start()
         {
             if (events[i].data.fd == socket.getSocketFd()) // Check if the event is for the listening socket
             {
-                [[likely]]
                 std::string clientIp;
                 int client_socket = socket.acceptConnection(clientIp); // Accept connection
                 if (client_socket < 0)
@@ -524,8 +544,8 @@ void Server::start()
                     continue;
                 }
 
-                ev.events = EPOLLIN;        // | EPOLLET;
-                ev.data.fd = client_socket; // Add the client socket to epoll
+                ev.events = EPOLLIN | EPOLLET; // Use edge-triggered mode
+                ev.data.fd = client_socket;    // Add the client socket to epoll
                 if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_socket, &ev) == -1)
                 {
                     Logger::getInstance()->error("Failed to add client socket to epoll");
