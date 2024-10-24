@@ -1,0 +1,116 @@
+@startuml Server Architecture
+
+skinparam class {
+    BackgroundColor<<Config>> LightGreen
+    BackgroundColor<<Core>> LightBlue
+    BackgroundColor<<Utility>> LightGray
+}
+
+title Server Architecture Class Diagram
+
+package "Configuration" {
+    class Config <<Config>> {
+        + int port
+        + string staticFolder
+    }
+    note right of Config
+        Configuration structure
+        Loaded from config.json
+    end note
+}
+
+package "Core Components" {
+    class ThreadPool <<Core>> {
+        - vector<thread> workers
+        - queue<function> tasks
+        - mutex queueMutex
+        - condition_variable condition
+        - bool stop
+        + ThreadPool(size_t numThreads)
+        + ~ThreadPool()
+        + enqueue(function task)
+        - workerThread()
+    }
+    note right of ThreadPool
+        Manages worker threads
+        for concurrent request handling
+    end note
+
+    class Socket <<Core>> {
+        - int server_fd
+        - int port
+        + Socket(int port)
+        + ~Socket()
+        + bind()
+        + listen()
+        + acceptConnection()
+        + getSocketFd() const
+    }
+    note right of Socket
+        Handles low-level socket operations
+        and network communication
+    end note
+
+    class Router <<Core>> {
+        - string staticFolder
+        + Router(string staticFolder)
+        + route(string path, int client_socket)
+        - getMimeType(string path)
+        - readFileContent(string filePath)
+    }
+    note right of Router
+        Routes requests to appropriate
+        handlers and serves static files
+    end note
+
+    class Server <<Core>> {
+        + Server(int port, string staticFolder)
+        + start()
+        - handleClient(int client_socket)
+    }
+    note right of Server
+        Main server class orchestrating
+        all components
+    end note
+}
+
+package "Utility Classes" {
+    class Http <<Utility>> {
+        + {static} getRequestPath(string request)
+        + {static} sendResponse(int client_socket, string content, string mimeType, int statusCode)
+    }
+    note right of Http
+        Static utility class for
+        HTTP protocol handling
+    end note
+
+    class Parser <<Utility>> {
+        + {static} parseConfig(string configFilePath)
+    }
+    note right of Parser
+        Parses configuration file
+        using nlohmann/json library
+    end note
+}
+
+' Relationships
+Server *-- Socket : contains
+Server *-- Router : contains
+Server *-- ThreadPool : contains
+Server ..> Http : uses
+Parser ..> Config : creates
+Server ..> Config : uses
+Router ..> Http : uses
+
+' Layout hints
+Config -[hidden]> Http
+Http -[hidden]> Parser
+
+legend right
+    |= Color |= Component Type |
+    |<#LightGreen>| Configuration |
+    |<#LightBlue>| Core Components |
+    |<#LightGray>| Utility Classes |
+endlegend
+
+@enduml

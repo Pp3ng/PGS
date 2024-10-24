@@ -1,0 +1,4 @@
+{
+    "port": 8080,
+    "static_folder": "/path/to/static"
+}
