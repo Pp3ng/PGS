@@ -14,6 +14,8 @@ The server is built with a modular architecture, separating concerns into distin
 2. **Socket**: Handles low-level network operations.
 3. **Router**: Manages request routing and static file serving.
 4. **ThreadPool**: Manages worker threads for concurrent request processing.
+5. **HTTP** Request/Response: Data structures for handling HTTP requests and responses.
+6. **Logger**: Simple logging utility for human readable output.
 
 ### Utility Components
 
@@ -55,7 +57,8 @@ Create a `config.json` file in the server's root directory:
 ```json
 {
   "port": 8080,
-  "static_folder": "./static"
+  "static_folder": "./static",
+  "thread_count": 4
 }
 ```
 
@@ -63,6 +66,7 @@ Create a `config.json` file in the server's root directory:
 
 - `port`: Server listening port
 - `static_folder`: Directory containing static files to serve
+- `thread_count`: Number of worker threads in thread pool
 
 ## Usage
 
@@ -73,22 +77,22 @@ Create a `config.json` file in the server's root directory:
 
 The server will:
 
-1. Load configuration from config.json
-2. Initialize the thread pool
-3. Start listening on the configured port
-4. Serve static files from the configured directory
+1. Log all actions to the console and log file
+2. Load configuration from config.json
+3. Initialize the thread pool
+4. Start listening on the configured port
+5. Serve static files from the configured directory
 
 ## Design Decisions
 
 ### ThreadPool Implementation
 
-- Uses a fixed number of worker threads (default: 4)
 - Thread-safe queue for task management
 - Condition variables for thread synchronization
 
 ### Socket Handling
 
-- Non-blocking sockets with epoll
+- Non-blocking sockets with epoll for I/O multiplexing
 - SO_REUSEADDR and SO_REUSEPORT options enabled
 - IPv4 support
 
@@ -157,6 +161,5 @@ The server will:
 - [ ] Add support for dynamic content
 - [ ] Cross-platform compatibility
 - [ ] Configuration hot-reloading
-- [ ] Request logging
 - [ ] Better error reporting
 - [ ] Performance metrics

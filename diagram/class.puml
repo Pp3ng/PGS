@@ -1,4 +1,4 @@
-@startuml Server Architecture
+@startuml server-architecture
 
 skinparam class {
     BackgroundColor<<Config>> LightGreen
@@ -12,6 +12,7 @@ package "Configuration" {
     class Config <<Config>> {
         + int port
         + string staticFolder
+        + int threadCount
     }
     note right of Config
         Configuration structure
@@ -31,10 +32,6 @@ package "Core Components" {
         + enqueue(function task)
         - workerThread()
     }
-    note right of ThreadPool
-        Manages worker threads
-        for concurrent request handling
-    end note
 
     class Socket <<Core>> {
         - int server_fd
@@ -46,10 +43,6 @@ package "Core Components" {
         + acceptConnection()
         + getSocketFd() const
     }
-    note right of Socket
-        Handles low-level socket operations
-        and network communication
-    end note
 
     class Router <<Core>> {
         - string staticFolder
@@ -58,19 +51,29 @@ package "Core Components" {
         - getMimeType(string path)
         - readFileContent(string filePath)
     }
-    note right of Router
-        Routes requests to appropriate
-        handlers and serves static files
-    end note
 
     class Server <<Core>> {
-        + Server(int port, string staticFolder)
+        + Server(int port, string staticFolder, int threadCount)
         + start()
         - handleClient(int client_socket)
     }
-    note right of Server
-        Main server class orchestrating
-        all components
+
+    class Logger <<Core>> {
+        - static Logger* instance
+        - ofstream logFile
+        - mutex logMutex
+        - Logger()
+        + static Logger* getInstance()
+        + ~Logger()
+        + log(string message, string level)
+        + error(string message)
+        + warning(string message)
+        + success(string message)
+        + info(string message)
+    }
+    note right of Logger
+        Singleton logger class
+        Handles all system logging
     end note
 }
 
@@ -79,17 +82,22 @@ package "Utility Classes" {
         + {static} getRequestPath(string request)
         + {static} sendResponse(int client_socket, string content, string mimeType, int statusCode)
     }
-    note right of Http
-        Static utility class for
-        HTTP protocol handling
-    end note
 
     class Parser <<Utility>> {
         + {static} parseConfig(string configFilePath)
     }
-    note right of Parser
-        Parses configuration file
-        using nlohmann/json library
+
+    class TerminalUtils <<Utility>> {
+        + {static} success(string msg)
+        + {static} error(string msg)
+        + {static} info(string msg)
+        + {static} warning(string msg)
+        + {static} highlight(string msg)
+        + {static} step(int num, string msg)
+    }
+    note right of TerminalUtils
+        Provides terminal styling
+        and formatting utilities
     end note
 }
 
@@ -101,6 +109,10 @@ Server ..> Http : uses
 Parser ..> Config : creates
 Server ..> Config : uses
 Router ..> Http : uses
+Logger ..> TerminalUtils : uses
+Server ..> Logger : uses
+Socket ..> Logger : uses
+Router ..> Logger : uses
 
 ' Layout hints
 Config -[hidden]> Http
