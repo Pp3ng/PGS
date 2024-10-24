@@ -56,8 +56,8 @@ Create a `config.json` file in the server's root directory:
 
 ```json
 {
-  "port": 8080,
-  "static_folder": "./static",
+  "port": 9527,
+  "static_folder": "./path/to/static",
   "thread_count": 4
 }
 ```
@@ -82,6 +82,10 @@ The server will:
 3. Initialize the thread pool
 4. Start listening on the configured port
 5. Serve static files from the configured directory
+
+### Sample
+
+![sample](sample.png)
 
 ## Design Decisions
 
