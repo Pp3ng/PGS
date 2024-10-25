@@ -8,20 +8,25 @@ The server is built with a modular architecture, separating concerns into distin
 
 ![Server Architecture](diagram/server-architecture.png)
 
+## Usecase Diagram
+
+![Usecase Diagram](diagram/server-usecase.png)
+
 ### Core Components
 
 1. **Server**: The main orchestrator that initializes and coordinates all components.
 2. **Socket**: Handles low-level network operations.
 3. **Router**: Manages request routing and static file serving.
 4. **ThreadPool**: Manages worker threads for concurrent request processing.
-5. **HTTP** Request/Response: Data structures for handling HTTP requests and responses.
-6. **Logger**: Simple logging utility for human readable output.
+5. **Logger**: Thread-safe singleton logger for output formatting and logging.
+6. **EpollWrapper**: Wrapper for epoll-based I/O multiplexing.
 
 ### Utility Components
 
 1. **Http**: Static utility class for HTTP protocol operations.
 2. **Parser**: Configuration file parser using nlohmann/json.
 3. **Config**: Structure for storing server configuration.
+4. **TerminalUtils**: Utility for formatting terminal output.
 
 ## Features
 
@@ -32,6 +37,7 @@ The server is built with a modular architecture, separating concerns into distin
 - 🎯 MIME type detection
 - 🚀 Thread pool for efficient concurrency
 - 📌 Directory index support (serves index.html by default)
+- 🖥️ Colored terminal output
 
 ## Prerequisites
 
@@ -77,13 +83,13 @@ Create a `config.json` file in the server's root directory:
 
 The server will:
 
-1. Log all actions to the console and log file
-2. Load configuration from config.json
+1. Log all actions to the console with colored output
+2. Load configuration from pgs_conf.json
 3. Initialize the thread pool
 4. Start listening on the configured port
 5. Serve static files from the configured directory
 
-### Sample
+### sample
 
 ![sample](sample.png)
 
@@ -93,12 +99,13 @@ The server will:
 
 - Thread-safe queue for task management
 - Condition variables for thread synchronization
+- Graceful shutdown support
 
 ### Socket Handling
 
 - Non-blocking sockets with epoll for I/O multiplexing
-- SO_REUSEADDR and SO_REUSEPORT options enabled
-- IPv4 support
+- SO_REUSEADDR option enabled
+- IPv6 support (dual-stack)
 
 ### Router Features
 
@@ -120,6 +127,7 @@ The server will:
 - Configuration file parsing errors
 - File read/write errors
 - Invalid request handling
+- Epoll operation errors
 
 ## Performance Considerations
 
@@ -135,8 +143,8 @@ The server will:
    - Configurable thread count
 
 3. **Static File Serving**
-   - Efficient file reading
-   - MIME type caching
+   - Efficient file reading (binary and text)
+   - MIME type detection
    - Directory traversal prevention
 
 ### Response Codes
@@ -148,8 +156,9 @@ The server will:
 ## Safety and Security
 
 - Directory traversal prevention
-- Basic error handling
+- Robust error handling
 - Resource cleanup on shutdown
+- Graceful shutdown support
 
 ## Known Limitations
 
@@ -165,5 +174,8 @@ The server will:
 - [ ] Add support for dynamic content
 - [ ] Cross-platform compatibility
 - [ ] Configuration hot-reloading
-- [ ] Better error reporting
-- [ ] Performance metrics
+- [ ] Better error reporting and logging
+- [ ] Performance metrics and monitoring
+- [ ] HTTP/2 support
+- [ ] WebSocket support
+- [ ] Rate limiting and DDoS protection

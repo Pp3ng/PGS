@@ -1,0 +1,94 @@
+@startuml server-usecase
+
+left to right direction
+actor "Client 1" as Client1
+actor "Client 2" as Client2
+actor "Client 3" as Client3
+actor "Administrator" as Admin
+
+rectangle "PGS Server" {
+    usecase "Initialize Server" as UC1
+    usecase "Parse Configuration" as UC2
+    usecase "Start Server" as UC3
+    usecase "Accept New Connection" as UC4
+    usecase "Handle HTTP Request" as UC5
+    usecase "Route Request" as UC6
+    usecase "Serve Static File" as UC7
+    usecase "Manage Connections" as UC8
+    usecase "Log Activities" as UC9
+    usecase "Stop Server" as UC10
+    usecase "Handle Client Connection" as UC11
+    usecase "Manage Thread Pool" as UC12
+    usecase "Manage Epoll Events" as UC13
+    usecase "Send HTTP Response" as UC14
+    usecase "Read File Content" as UC15
+    usecase "Determine MIME Type" as UC16
+    usecase "Close Connection" as UC17
+    usecase "Handle Asset Request" as UC18
+    usecase "Handle Non-Asset Request" as UC19
+    usecase "Buffer Log Messages" as UC20
+    usecase "Flush Log Buffer" as UC21
+    usecase "Set Socket Options" as UC22
+    usecase "Create Dual-Stack Socket" as UC23
+    usecase "Set Non-Blocking Mode" as UC24
+    usecase "Handle Signal" as UC25
+    usecase "Graceful Shutdown" as UC26
+}
+
+Client1 --> UC4
+Client1 --> UC5
+Client2 --> UC4
+Client2 --> UC5
+Client3 --> UC4
+Client3 --> UC5
+Admin --> UC1
+Admin --> UC3
+Admin --> UC10
+Admin --> UC25
+
+UC1 ..> UC2 : includes
+UC1 ..> UC22 : includes
+UC1 ..> UC23 : includes
+UC1 ..> UC24 : includes
+UC3 ..> UC4 : includes
+UC3 ..> UC12 : includes
+UC3 ..> UC13 : includes
+UC4 ..> UC11 : triggers
+UC5 ..> UC6 : includes
+UC5 ..> UC8 : includes
+UC5 ..> UC9 : includes
+UC6 ..> UC18 : includes
+UC6 ..> UC19 : includes
+UC7 ..> UC15 : includes
+UC7 ..> UC16 : includes
+UC7 ..> UC14 : includes
+UC8 ..> UC17 : may trigger
+UC9 ..> UC20 : includes
+UC9 ..> UC21 : includes
+UC10 ..> UC8 : includes
+UC10 ..> UC17 : includes
+UC10 ..> UC26 : includes
+UC11 ..> UC5 : includes
+UC13 ..> UC11 : manages
+UC17 ..> UC9 : triggers
+UC18 ..> UC7 : includes
+UC19 ..> UC7 : includes
+UC25 ..> UC10 : triggers
+
+note right of UC1 : Includes setting up socket, router, and thread pool
+note right of UC2 : Reads and validates configuration from JSON file
+note right of UC3 : Sets up epoll and starts main server loop
+note right of UC4 : Accepts new connections
+note right of UC5 : Reads and processes client request
+note right of UC6 : Determines how to handle the request based on path
+note right of UC7 : Reads file content and prepares response
+note right of UC8 : Tracks and manages client connections
+note right of UC9 : Logs various server activities and client interactions
+note right of UC10 : Stops accepting new connections and closes existing ones
+note right of UC11 : Handles individual client connections
+note right of UC12 : Manages worker threads for handling requests
+note right of UC13 : Manages epoll events for efficient I/O handling
+note right of UC25 : Handles SIGINT and SIGTERM signals
+note right of UC26 : Ensures proper shutdown of all components
+
+@enduml

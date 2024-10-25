@@ -1,128 +1,187 @@
 @startuml server-architecture
 
-skinparam class {
-    BackgroundColor<<Config>> LightGreen
-    BackgroundColor<<Core>> LightBlue
-    BackgroundColor<<Utility>> LightGray
+!define ABSTRACT abstract class
+
+skinparam {
+    ClassAttributeIconSize 0
+    ClassBackgroundColor<<Config>> LightGreen
+    ClassBackgroundColor<<Core>> LightBlue
+    ClassBackgroundColor<<Utility>> LightGray
+    ClassBackgroundColor<<Structure>> LightYellow
+    PackageBackgroundColor White
+    PackageBorderColor Gray
+    ClassFontSize 12
+    NoteFontSize 11
+    PackageFontSize 13
 }
 
 title Server Architecture Class Diagram
 
 package "Configuration" {
     class Config <<Config>> {
-        + int port
-        + string staticFolder
-        + int threadCount
+        + port: int
+        + staticFolder: string
+        + threadCount: int
     }
     note right of Config
-        Configuration structure
-        Loaded from config.json
+        Plain configuration structure
+        Initialized from pgs_conf.json
     end note
+}
+
+package "Data Structures" {
+    class ConnectionInfo <<Structure>> {
+        + startTime: chrono::steady_clock::time_point
+        + ip: string
+        + isLogged: bool
+        + isClosureLogged: bool
+        + bytesReceived: uint64_t
+        + bytesSent: uint64_t
+        + logBuffer: vector<string>
+        + ConnectionInfo(time, ipAddr, logged, closureLogged, received, sent)
+    }
 }
 
 package "Core Components" {
     class ThreadPool <<Core>> {
-        - vector<thread> workers
-        - queue<function> tasks
-        - mutex queueMutex
-        - condition_variable condition
-        - bool stop
+        - workers: vector<thread>
+        - tasks: queue<function<void()>>
+        - queueMutex: mutex
+        - condition: condition_variable
+        - stop_flag: atomic<bool>
         + ThreadPool(size_t numThreads)
         + ~ThreadPool()
-        + enqueue(function task)
-        - workerThread()
+        + enqueue(function<void()> task): void
+        + stop(): void
+        - workerThread(): void
     }
 
     class Socket <<Core>> {
-        - int server_fd
-        - int port
+        - server_fd: int
+        - port: int
         + Socket(int port)
         + ~Socket()
-        + bind()
-        + listen()
-        + acceptConnection()
-        + getSocketFd() const
+        + bind(): void
+        + listen(): void
+        + closeSocket(): void
+        + acceptConnection(string& clientIp): int
+        + getSocketFd() const: int
+        + {static} durationToString(chrono::steady_clock::duration& duration): string
     }
 
     class Router <<Core>> {
-        - string staticFolder
-        + Router(string staticFolder)
-        + route(string path, int client_socket)
-        - getMimeType(string path)
-        - readFileContent(string filePath)
+        - staticFolder: string
+        + Router(const string& staticFolder)
+        + route(const string& path, int client_socket, const string& clientIp): void
+        + getStaticFolder() const: string
+        - getMimeType(const string& path): string
+        - readFileContent(const string& filePath): string
+        - readBinaryFile(const string& filePath, string& content): bool
     }
 
     class Server <<Core>> {
-        + Server(int port, string staticFolder, int threadCount)
-        + start()
-        - handleClient(int client_socket)
+        - socket: Socket
+        - router: Router
+        - pool: ThreadPool
+        - connectionsMutex: mutex
+        - connections: map<int, ConnectionInfo>
+        - shouldStop: atomic<bool>
+        - epoll: EpollWrapper
+        + Server(int port, const string& staticFolder, int threadCount)
+        + start(): void
+        + stop(): void
+        - handleClient(int client_socket, const string& clientIp): void
+        - closeConnection(int client_socket): void
+        - logRequest(int client_socket, const string& message): void
     }
 
     class Logger <<Core>> {
-        - static Logger* instance
-        - ofstream logFile
-        - mutex logMutex
+        - {static} instance: Logger*
+        - logFile: ofstream
+        - logMutex: mutex
+        - isWaitingForEvents: bool
+        - lastEventWaitLog: chrono::steady_clock::time_point
+        - EVENT_WAIT_LOG_INTERVAL: chrono::seconds
         - Logger()
-        + static Logger* getInstance()
+        - getTimestamp(): string
+        + {static} getInstance(): Logger*
+        + {static} destroyInstance(): void
         + ~Logger()
-        + log(string message, string level)
-        + error(string message)
-        + warning(string message)
-        + success(string message)
-        + info(string message)
+        + log(const string& message, const string& level, const string& ip): void
+        + error(const string& message, const string& ip): void
+        + warning(const string& message, const string& ip): void
+        + info(const string& message, const string& ip): void
+        + success(const string& message, const string& ip): void
     }
-    note right of Logger
-        Singleton logger class
-        Handles all system logging
-    end note
+
+    class EpollWrapper <<Core>> {
+        - epoll_fd: int
+        + EpollWrapper()
+        + ~EpollWrapper()
+        + EpollWrapper(EpollWrapper&& other) noexcept
+        + EpollWrapper& operator=(EpollWrapper&& other) noexcept
+        + get() const: int
+        + wait(epoll_event* events, int maxEvents, int timeout): int
+        + add(int fd, uint32_t events): void
+        + modify(int fd, uint32_t events): void
+        + remove(int fd): void
+    }
 }
 
 package "Utility Classes" {
     class Http <<Utility>> {
-        + {static} getRequestPath(string request)
-        + {static} sendResponse(int client_socket, string content, string mimeType, int statusCode)
+        + {static} getRequestPath(const string& request): string
+        + {static} sendResponse(int client_socket, const string& content, const string& mimeType, int statusCode, const string& clientIp, bool isIndex): void
+        + {static} isAssetRequest(const string& path): bool
     }
 
     class Parser <<Utility>> {
-        + {static} parseConfig(string configFilePath)
+        + {static} parseConfig(const string& configFilePath): Config
     }
 
     class TerminalUtils <<Utility>> {
-        + {static} success(string msg)
-        + {static} error(string msg)
-        + {static} info(string msg)
-        + {static} warning(string msg)
-        + {static} highlight(string msg)
-        + {static} step(int num, string msg)
+        + {static} success(const string& msg): string
+        + {static} error(const string& msg): string
+        + {static} info(const string& msg): string
+        + {static} warning(const string& msg): string
+        + {static} highlight(const string& msg): string
+        + {static} step(int num, const string& msg): string
     }
-    note right of TerminalUtils
-        Provides terminal styling
-        and formatting utilities
-    end note
 }
 
-' Relationships
-Server *-- Socket : contains
-Server *-- Router : contains
-Server *-- ThreadPool : contains
-Server ..> Http : uses
-Parser ..> Config : creates
-Server ..> Config : uses
-Router ..> Http : uses
-Logger ..> TerminalUtils : uses
-Server ..> Logger : uses
-Socket ..> Logger : uses
-Router ..> Logger : uses
+' Core dependencies
+Server "1" *-- "1" Socket : manages >
+Server "1" *-- "1" Router : uses >
+Server "1" *-- "1" ThreadPool : delegates tasks to >
+Server "1" o-- "0..*" ConnectionInfo : tracks >
+Server "1" *-- "1" EpollWrapper : uses >
+
+' Config dependencies
+Server ..> Config : configured by >
+
+' Utility dependencies
+Server ..> Http : uses >
+Parser ..> Config : creates >
+Server ..> Logger : logs through >
+Socket ..> Logger : logs operations >
+Router ..> Logger : logs access >
+Router ..> Http : uses >
+Logger ..> TerminalUtils : formats with >
+
+' Configuration flow
+Parser ..> TerminalUtils : uses for output >
 
 ' Layout hints
-Config -[hidden]> Http
-Http -[hidden]> Parser
+Config -[hidden]-> Http
+Http -[hidden]-> Parser
+TerminalUtils -[hidden]-> Logger
 
 legend right
-    |= Color |= Component Type |
-    |<#LightGreen>| Configuration |
-    |<#LightBlue>| Core Components |
-    |<#LightGray>| Utility Classes |
+    |= Color |= Component Type |= Purpose |
+    |<#LightGreen>| Configuration |Configuration structures|
+    |<#LightBlue>| Core Components |Server functionality|
+    |<#LightGray>| Utility Classes |Helper functions|
+    |<#LightYellow>| Data Structures |Data management|
 endlegend
 
 @enduml
