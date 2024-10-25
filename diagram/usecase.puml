@@ -1,40 +1,74 @@
 @startuml server-usecase
 
+' Layout direction
 left to right direction
-actor "Client 1" as Client1
-actor "Client 2" as Client2
-actor "Client 3" as Client3
-actor "Administrator" as Admin
 
-rectangle "PGS Server" {
-    usecase "Initialize Server" as UC1
-    usecase "Parse Configuration" as UC2
-    usecase "Start Server" as UC3
-    usecase "Accept New Connection" as UC4
-    usecase "Handle HTTP Request" as UC5
-    usecase "Route Request" as UC6
-    usecase "Serve Static File" as UC7
-    usecase "Manage Connections" as UC8
-    usecase "Log Activities" as UC9
-    usecase "Stop Server" as UC10
-    usecase "Handle Client Connection" as UC11
-    usecase "Manage Thread Pool" as UC12
-    usecase "Manage Epoll Events" as UC13
-    usecase "Send HTTP Response" as UC14
-    usecase "Read File Content" as UC15
-    usecase "Determine MIME Type" as UC16
-    usecase "Close Connection" as UC17
-    usecase "Handle Asset Request" as UC18
-    usecase "Handle Non-Asset Request" as UC19
-    usecase "Buffer Log Messages" as UC20
-    usecase "Flush Log Buffer" as UC21
-    usecase "Set Socket Options" as UC22
-    usecase "Create Dual-Stack Socket" as UC23
-    usecase "Set Non-Blocking Mode" as UC24
-    usecase "Handle Signal" as UC25
-    usecase "Graceful Shutdown" as UC26
+' Actor definitions
+:Client 1: as Client1 #aliceblue
+:Client 2: as Client2 #aliceblue
+:Client 3: as Client3 #aliceblue
+:Administrator: as Admin #lightgreen
+
+' System boundary
+rectangle "PGS Server System" {
+    ' Server Initialization
+    package "Server Initialization" {
+        usecase "Initialize Server" as UC1
+        usecase "Parse Configuration" as UC2
+        usecase "Set Socket Options" as UC22
+        usecase "Create Dual-Stack Socket" as UC23
+        usecase "Set Non-Blocking Mode" as UC24
+    }
+
+    ' Server Operation
+    package "Server Operation" {
+        usecase "Start Server" as UC3
+        usecase "Accept New Connection" as UC4
+        usecase "Manage Thread Pool" as UC12
+        usecase "Manage Epoll Events" as UC13
+    }
+
+    ' Request Handling
+    package "Request Processing" {
+        usecase "Handle HTTP Request" as UC5
+        usecase "Route Request" as UC6
+        usecase "Handle Asset Request" as UC18
+        usecase "Handle Non-Asset Request" as UC19
+        usecase "Rate Limit Requests" as UC27
+        usecase "Compress Responses" as UC28
+    }
+
+    ' File Operations
+    package "File Operations" {
+        usecase "Serve Static File" as UC7
+        usecase "Read File Content" as UC15
+        usecase "Determine MIME Type" as UC16
+        usecase "Send HTTP Response" as UC14
+    }
+
+    ' Connection Management
+    package "Connection Management" {
+        usecase "Manage Connections" as UC8
+        usecase "Handle Client Connection" as UC11
+        usecase "Close Connection" as UC17
+    }
+
+    ' Logging System
+    package "Logging" {
+        usecase "Log Activities" as UC9
+        usecase "Buffer Log Messages" as UC20
+        usecase "Flush Log Buffer" as UC21
+    }
+
+    ' Server Shutdown
+    package "Shutdown Management" {
+        usecase "Stop Server" as UC10
+        usecase "Handle Signal" as UC25
+        usecase "Graceful Shutdown" as UC26
+    }
 }
 
+' Actor relationships
 Client1 --> UC4
 Client1 --> UC5
 Client2 --> UC4
@@ -46,49 +80,71 @@ Admin --> UC3
 Admin --> UC10
 Admin --> UC25
 
-UC1 ..> UC2 : includes
-UC1 ..> UC22 : includes
-UC1 ..> UC23 : includes
-UC1 ..> UC24 : includes
-UC3 ..> UC4 : includes
-UC3 ..> UC12 : includes
-UC3 ..> UC13 : includes
-UC4 ..> UC11 : triggers
-UC5 ..> UC6 : includes
-UC5 ..> UC8 : includes
-UC5 ..> UC9 : includes
-UC6 ..> UC18 : includes
-UC6 ..> UC19 : includes
-UC7 ..> UC15 : includes
-UC7 ..> UC16 : includes
-UC7 ..> UC14 : includes
-UC8 ..> UC17 : may trigger
-UC9 ..> UC20 : includes
-UC9 ..> UC21 : includes
-UC10 ..> UC8 : includes
-UC10 ..> UC17 : includes
-UC10 ..> UC26 : includes
-UC11 ..> UC5 : includes
-UC13 ..> UC11 : manages
-UC17 ..> UC9 : triggers
-UC18 ..> UC7 : includes
-UC19 ..> UC7 : includes
-UC25 ..> UC10 : triggers
+' Include relationships
+UC1 ..> UC2 : <<include>>
+UC1 ..> UC22 : <<include>>
+UC1 ..> UC23 : <<include>>
+UC1 ..> UC24 : <<include>>
 
-note right of UC1 : Includes setting up socket, router, and thread pool
-note right of UC2 : Reads and validates configuration from JSON file
-note right of UC3 : Sets up epoll and starts main server loop
-note right of UC4 : Accepts new connections
-note right of UC5 : Reads and processes client request
-note right of UC6 : Determines how to handle the request based on path
-note right of UC7 : Reads file content and prepares response
-note right of UC8 : Tracks and manages client connections
-note right of UC9 : Logs various server activities and client interactions
-note right of UC10 : Stops accepting new connections and closes existing ones
-note right of UC11 : Handles individual client connections
-note right of UC12 : Manages worker threads for handling requests
-note right of UC13 : Manages epoll events for efficient I/O handling
-note right of UC25 : Handles SIGINT and SIGTERM signals
-note right of UC26 : Ensures proper shutdown of all components
+UC3 ..> UC4 : <<include>>
+UC3 ..> UC12 : <<include>>
+UC3 ..> UC13 : <<include>>
+
+UC4 ..> UC11 : <<trigger>>
+
+UC5 ..> UC6 : <<include>>
+UC5 ..> UC8 : <<include>>
+UC5 ..> UC9 : <<include>>
+UC5 ..> UC27 : <<extend>>
+UC5 ..> UC28 : <<extend>>
+
+UC6 ..> UC18 : <<include>>
+UC6 ..> UC19 : <<include>>
+
+UC7 ..> UC15 : <<include>>
+UC7 ..> UC16 : <<include>>
+UC7 ..> UC14 : <<include>>
+
+UC8 ..> UC17 : <<extend>>
+
+UC9 ..> UC20 : <<include>>
+UC9 ..> UC21 : <<include>>
+
+UC10 ..> UC8 : <<include>>
+UC10 ..> UC17 : <<include>>
+UC10 ..> UC26 : <<include>>
+
+UC11 ..> UC5 : <<include>>
+
+UC13 ..> UC11 : <<manage>>
+
+UC17 ..> UC9 : <<trigger>>
+
+UC18 ..> UC7 : <<include>>
+UC19 ..> UC7 : <<include>>
+
+UC25 ..> UC10 : <<trigger>>
+
+' Notes
+note "Handles server initialization including\nsocket setup and configuration loading" as N1
+N1 .. UC1
+
+note "Manages concurrent client connections\nand request processing" as N2
+N2 .. UC3
+
+note "Implements rate limiting and compression\nas optional request processing steps" as N3
+N3 .. UC5
+
+note "Efficiently serves static files with\nproper MIME type detection" as N4
+N4 .. UC7
+
+note "Ensures thread safety and proper\nresource cleanup" as N5
+N5 .. UC8
+
+note "Implements asynchronous logging\nwith buffering" as N6
+N6 .. UC9
+
+note "Ensures graceful shutdown with\nproper resource cleanup" as N7
+N7 .. UC10
 
 @enduml

@@ -20,6 +20,9 @@ The server is built with a modular architecture, separating concerns into distin
 4. **ThreadPool**: Manages worker threads for concurrent request processing.
 5. **Logger**: Thread-safe singleton logger for output formatting and logging.
 6. **EpollWrapper**: Wrapper for epoll-based I/O multiplexing.
+7. **Middleware**: Abstract class for request/response middleware.
+   - **CompressionMiddleware**: Gzip compression middleware.
+   - **RateLimitMiddleware**: Rate limiting middleware.
 
 ### Utility Components
 
@@ -53,7 +56,7 @@ git clone https://github.com/Pp3ng/pgs.git
 
 # Create build directory
 cd pgs
-make pgs
+g++ -std=c++17 -o pgs pgs.cpp -Wall -lz -pthread -lstdc++fs
 ```
 
 ## Configuration
@@ -146,6 +149,7 @@ The server will:
    - Efficient file reading (binary and text)
    - MIME type detection
    - Directory traversal prevention
+   - Compression support
 
 ### Response Codes
 
@@ -159,6 +163,7 @@ The server will:
 - Robust error handling
 - Resource cleanup on shutdown
 - Graceful shutdown support
+- Rate limiting middleware
 
 ## Known Limitations
 
@@ -178,4 +183,4 @@ The server will:
 - [ ] Performance metrics and monitoring
 - [ ] HTTP/2 support
 - [ ] WebSocket support
-- [ ] Rate limiting and DDoS protection
+- [x] Rate limiting and DDoS protection

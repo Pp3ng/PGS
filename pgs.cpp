@@ -18,9 +18,14 @@
 #include <fcntl.h>            // File control
 #include <nlohmann/json.hpp>  // Parse JSON
 #include <map>                // For storing connection info
+#include <deque>              // For rate limiting
+#include <unordered_map>      // For rate limiting
 #include <chrono>             // For time measurement
 #include <csignal>            // Signal handling
 #include <atomic>             // Atomic bool flag
+#include <zlib.h>             // zlib compression
+#include <algorithm>          // std::transform
+#include <stdexcept>          // std::runtime_error
 #include "include/terminal_utils.h"
 
 namespace fs = std::filesystem; // Alias for filesystem namespace
@@ -54,7 +59,6 @@ struct ConnectionInfo
           isClosureLogged(closureLogged), bytesReceived(received),
           bytesSent(sent) {}
 };
-
 class Logger
 {
 
@@ -184,6 +188,150 @@ public:
 
 Logger *Logger::instance = nullptr; // Initialize the static singleton instance
 
+class Middleware
+{
+public:
+    virtual ~Middleware() = default;
+    virtual std::string process(const std::string &data) = 0;
+};
+
+class RateLimiter : public Middleware
+{
+public:
+    // Constructor to initialize the maximum number of requests and the time window
+    RateLimiter(size_t maxRequests, std::chrono::seconds timeWindow)
+        : maxRequests(maxRequests), timeWindow(timeWindow) {}
+
+    std::string process(const std::string &data) override // override the process method
+    {
+        std::lock_guard<std::mutex> lock(rateMutex); // lock the mutex to protect the clientRequests map
+
+        auto now = std::chrono::steady_clock::now(); // get the current timestamp
+
+        auto &timestamps = clientRequests[data]; // retrieve the reference to the list of timestamps
+
+        while (!timestamps.empty() && now - timestamps.front() > timeWindow) // remove expired timestamps
+        {
+            timestamps.pop_front(); // Remove the oldest timestamp
+        }
+
+        // Check if the number of requests in the time window exceeds the allowed limit
+        if (timestamps.size() >= maxRequests)
+        {
+            // If exceeded, return a 429 Too Many Requests response
+            return "HTTP/1.1 429 Too Many Requests\r\n"
+                   "Content-Type: text/plain\r\n"
+                   "Content-Length: 19\r\n"
+                   "\r\n"
+                   "Too Many Requests";
+        }
+
+        timestamps.push_back(now); // add the current timestamp to the list
+
+        return data; // return the original data if the rate limit is not exceeded
+    }
+
+private:
+    size_t maxRequests;              // Maximum number of requests allowed within the time window
+    std::chrono::seconds timeWindow; // Duration of the time window for rate limiting
+    // Map to store timestamps of requests for each client, identified by their data
+    std::unordered_map<std::string, std::deque<std::chrono::steady_clock::time_point>> clientRequests;
+    std::mutex rateMutex; // Mutex to protect access to clientRequests
+};
+
+class Compression : public Middleware
+{
+public:
+    [[nodiscard]]
+    static bool shouldCompress(const std::string &mimeType, size_t contentLength)
+    {
+        static const std::vector<std::string> compressibleTypes = {
+            "text/", "application/javascript", "application/json",
+            "application/xml", "application/x-yaml"}; // list of compressible MIME types
+
+        if (contentLength < 1024)
+        { // 1KB
+            return false;
+        }
+
+        return std::any_of(compressibleTypes.begin(), compressibleTypes.end(),
+                           [&mimeType](const std::string &type)
+                           {
+                               return mimeType.find(type) != std::string::npos;
+                           });
+    }
+
+    [[nodiscard]]
+    static bool clientAcceptsGzip(const std::string &request)
+    {
+        return request.find("Accept-Encoding: ") != std::string::npos &&
+               request.find("gzip") != std::string::npos;
+    }
+
+    [[nodiscard]]
+    std::string process(const std::string &data) override
+    {
+        std::string compressed = compressData(data);
+        if (!compressed.empty()) // check if compression was successful
+        {
+            Logger::getInstance()->info("Compressed data: " + std::to_string(data.size()) + " -> " + std::to_string(compressed.size()));
+            return compressed;
+        }
+        return data; // Ensure a string is returned in all cases
+    }
+
+private:
+    [[nodiscard]]
+    std::string compressData(const std::string &data)
+    {
+        z_stream zs;                // Create a z_stream object for compression
+        memset(&zs, 0, sizeof(zs)); // Zero-initialize the z_stream structure
+
+        // Initialize the zlib compression
+        if (deflateInit2(&zs, Z_DEFAULT_COMPRESSION,  // set the compression level
+                         Z_DEFLATED,                  // use the deflate compression method
+                         15 | 16,                     // 15 | 16 for gzip encoding
+                         8,                           // set the window size
+                         Z_DEFAULT_STRATEGY) != Z_OK) // use the default compression strategy
+        {
+            throw std::runtime_error("Failed to initialize zlib");
+        }
+
+        // Set the input data for compression
+        zs.next_in = reinterpret_cast<Bytef *>(const_cast<char *>(data.data())); // input data
+        zs.avail_in = data.size();                                               // size of input data
+
+        int ret;                         // variable to hold the return status of compression
+        const size_t bufferSize = 32768; // define the size of the output buffer (32KB)
+        std::string compressed;          // string to hold the final compressed data
+        char outbuffer[bufferSize];      // buffer for compressed output
+
+        // compress the data in a loop until all data is processed
+        do
+        {
+            zs.next_out = reinterpret_cast<Bytef *>(outbuffer); // output buffer for compressed data
+            zs.avail_out = bufferSize;                          // size of the output buffer
+
+            ret = deflate(&zs, Z_FINISH); // perform the compression operation
+
+            if (compressed.size() < zs.total_out) // append the compressed data to the output string
+            {
+                compressed.append(outbuffer, zs.total_out - compressed.size());
+            }
+        } while (ret == Z_OK); // continue until no more data to compress
+
+        // check if compression completed successfully
+        if (ret != Z_STREAM_END)
+        {
+            deflateEnd(&zs); // clean up the z_stream object
+            throw std::runtime_error("Failed to compress data");
+        }
+
+        deflateEnd(&zs);   // clean up and free resources allocated by zlib
+        return compressed; // return the compressed data
+    }
+};
+
 class ThreadPool
 {
 public:
@@ -193,11 +341,11 @@ public:
     void stop();
 
 private:
-    std::vector<std::thread> workers;        // Worker threads
-    std::queue<std::function<void()>> tasks; // Task queue
-    std::mutex queueMutex;                   // Mutex to protect task queue
-    std::condition_variable condition;       // Condition variable for task queue
-    std::atomic<bool> stop_flag{false};      // Flag to stop the worker threads
+    std::vector<std::thread> workers;        // worker threads
+    std::queue<std::function<void()>> tasks; // task queue
+    std::mutex queueMutex;                   // mutex to protect task queue
+    std::condition_variable condition;       // condition variable for task queue
+    std::atomic<bool> stop_flag{false};      // flag to stop the worker threads
 
     void workerThread();
 };
@@ -206,7 +354,7 @@ ThreadPool::ThreadPool(size_t numThreads)
 {
     for (size_t i = 0; i < numThreads; ++i)
     {
-        workers.emplace_back(&ThreadPool::workerThread, this); // Create worker threads
+        workers.emplace_back(&ThreadPool::workerThread, this); // create worker threads
     }
 }
 
@@ -414,7 +562,8 @@ public:
     static std::string getRequestPath(const std::string &request);
     static void sendResponse(int client_socket, const std::string &content,
                              const std::string &mimeType, int statusCode,
-                             const std::string &clientIp, bool isIndex = false);
+                             const std::string &clientIp, bool isIndex = false,
+                             Middleware *middleware = nullptr);
     static bool isAssetRequest(const std::string &path)
     {
         static const std::vector<std::string> assetExtensions = {
@@ -463,17 +612,33 @@ std::string Http::getRequestPath(const std::string &request)
 
 void Http::sendResponse(int client_socket, const std::string &content,
                         const std::string &mimeType, int statusCode,
-                        const std::string &clientIp, bool isIndex)
+                        const std::string &clientIp, bool isIndex, Middleware *middleware)
 {
+    std::string responseContent = content;
+    bool isCompressed = false;
+
+    // Apply middleware if provided and client accepts gzip
+    if (middleware && Compression::shouldCompress(mimeType, content.size()))
+    {
+        responseContent = middleware->process(content);
+        isCompressed = true;
+    }
+
     std::ostringstream headers;
     headers << "HTTP/1.1 " << statusCode << " OK\r\n"
             << "Content-Type: " << mimeType << "\r\n"
-            << "Content-Length: " << content.size() << "\r\n"
-            << "\r\n";
+            << "Content-Length: " << responseContent.size() << "\r\n";
+
+    if (isCompressed) // Add Content-Encoding header if content is compressed
+    {
+        headers << "Content-Encoding: gzip\r\n";
+    }
+
+    headers << "\r\n";
 
     std::string headerStr = headers.str();
-    ssize_t headersSent = send(client_socket, headerStr.c_str(), headerStr.size(), 0); // Send the headers
-    ssize_t contentSent = send(client_socket, content.c_str(), content.size(), 0);     // Send the content
+    ssize_t headersSent = send(client_socket, headerStr.c_str(), headerStr.size(), 0);             // Send the headers
+    ssize_t contentSent = send(client_socket, responseContent.c_str(), responseContent.size(), 0); // Send the content
 
     size_t totalSent = (headersSent > 0 ? headersSent : 0) +
                        (contentSent > 0 ? contentSent : 0); // Calculate total bytes sent
@@ -495,8 +660,12 @@ public:
     {
         Logger::getInstance()->info("Router initialized with static folder: " + staticFolder);
     }
-    void route(const std::string &path, int client_socket, const std::string &clientIp);
-    std::string getStaticFolder() const { return staticFolder; }
+    void route(const std::string &path, int client_socket, const std::string &clientIp, Middleware *middleware);
+    [[nodiscard]]
+    std::string getStaticFolder() const
+    {
+        return staticFolder;
+    }
 
 private:
     std::string staticFolder;                                               // path to static files
@@ -586,7 +755,7 @@ std::string Router::readFileContent(const std::string &filePath)
     }
 }
 
-void Router::route(const std::string &path, int client_socket, const std::string &clientIp)
+void Router::route(const std::string &path, int client_socket, const std::string &clientIp, Middleware *middleware = nullptr)
 {
     std::string filePath = staticFolder + path;                                          // get full file path
     bool isIndex = (path == "/index.html" || path == "/" || fs::is_directory(filePath)); // check if it's an index request
@@ -636,7 +805,7 @@ void Router::route(const std::string &path, int client_socket, const std::string
     }
 
     std::string mimeType = getMimeType(filePath);
-    Http::sendResponse(client_socket, content, mimeType, 200, clientIp, !isAsset && isIndex); // send response
+    Http::sendResponse(client_socket, content, mimeType, 200, clientIp, !isAsset && isIndex, middleware); // send response
 }
 
 class Parser
@@ -914,10 +1083,12 @@ void Server::stop()
 
 void Server::handleClient(int client_socket, const std::string &clientIp)
 {
-    std::vector<char> buffer(1024); // initialize buffer
-    ssize_t valread;                // initialize valread
-    std::string request;            // initialize request string
-    bool connectionClosed = false;  // initialize connectionClosed flag
+    std::vector<char> buffer(1024); // Initialize buffer
+    ssize_t valread;                // Initialize valread
+    std::string request;            // Initialize request string
+    bool connectionClosed = false;  // Initialize connectionClosed flag
+
+    static RateLimiter rateLimiter(10, std::chrono::seconds(60)); // 10 requests per 60 seconds
 
     while ((valread = read(client_socket, buffer.data(), buffer.size())) > 0)
     {
@@ -937,25 +1108,42 @@ void Server::handleClient(int client_socket, const std::string &clientIp)
         }
     }
 
-    if (valread == 0 || (valread < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) // check if connection is closed
+    // Check if connection is closed
+    if (valread == 0 || (valread < 0 && errno != EAGAIN && errno != EWOULDBLOCK))
     {
         closeConnection(client_socket);
         connectionClosed = true;
     }
 
-    if (!connectionClosed && !request.empty()) // check if request is not empty
+    if (!connectionClosed && !request.empty()) // Check if request is not empty
     {
-        std::string path = Http::getRequestPath(request); // get request path
-        bool isAsset = Http::isAssetRequest(path);        // check if it's an asset request
+        std::string path = Http::getRequestPath(request); // Get request path
+        bool isAsset = Http::isAssetRequest(path);        // Check if it's an asset request
 
-        if (!isAsset)
+        if (!isAsset) // Log request if it's not an asset request
         {
             logRequest(client_socket, "Processing request: " + path);
         }
 
-        router.route(path, client_socket, clientIp); // route request
+        // Process request with rate limiter
+        std::string processedRequest = rateLimiter.process(request);
 
-        if (!isAsset)
+        if (processedRequest == "HTTP/1.1 429 Too Many Requests\r\n"
+                                "Content-Type: text/plain\r\n"
+                                "Content-Length: 19\r\n"
+                                "\r\n"
+                                "Too Many Requests")
+        {
+            // Send rate limit response
+            send(client_socket, processedRequest.c_str(), processedRequest.size(), 0);
+        }
+        else
+        {
+            Compression compressionMiddleware;                                   // Create compression middleware
+            router.route(path, client_socket, clientIp, &compressionMiddleware); // Route request with middleware
+        }
+
+        if (!isAsset) // Log request completion if it's not an asset request
         {
             logRequest(client_socket, "Request completed: " + path);
         }

@@ -17,135 +17,197 @@ skinparam {
 
 title Server Architecture Class Diagram
 
-package "Configuration" {
-    class Config <<Config>> {
-        + port: int
-        + staticFolder: string
-        + threadCount: int
+' Group configuration and data structures vertically
+together {
+    package "Configuration" {
+        class Config <<Config>> {
+            + port: int
+            + staticFolder: string
+            + threadCount: int
+        }
+        note right of Config
+            Plain configuration structure
+            Initialized from pgs_conf.json
+        end note
     }
-    note right of Config
-        Plain configuration structure
-        Initialized from pgs_conf.json
-    end note
+
+    package "Data Structures" {
+        class ConnectionInfo <<Structure>> {
+            + startTime: chrono::steady_clock::time_point
+            + ip: string
+            + isLogged: bool
+            + isClosureLogged: bool
+            + bytesReceived: uint64_t
+            + bytesSent: uint64_t
+            + logBuffer: vector<string>
+            + ConnectionInfo(time, ipAddr, logged, closureLogged, received, sent)
+        }
+        note bottom of ConnectionInfo
+            Tracks individual client connection metrics
+            and maintains connection-specific log buffers
+        end note
+    }
 }
 
-package "Data Structures" {
-    class ConnectionInfo <<Structure>> {
-        + startTime: chrono::steady_clock::time_point
-        + ip: string
-        + isLogged: bool
-        + isClosureLogged: bool
-        + bytesReceived: uint64_t
-        + bytesSent: uint64_t
-        + logBuffer: vector<string>
-        + ConnectionInfo(time, ipAddr, logged, closureLogged, received, sent)
-    }
-}
-
+' Core components in the center
 package "Core Components" {
-    class ThreadPool <<Core>> {
-        - workers: vector<thread>
-        - tasks: queue<function<void()>>
-        - queueMutex: mutex
-        - condition: condition_variable
-        - stop_flag: atomic<bool>
-        + ThreadPool(size_t numThreads)
-        + ~ThreadPool()
-        + enqueue(function<void()> task): void
-        + stop(): void
-        - workerThread(): void
+    together {
+        class Server <<Core>> {
+            - socket: Socket
+            - router: Router
+            - pool: ThreadPool
+            - connectionsMutex: mutex
+            - connections: map<int, ConnectionInfo>
+            - shouldStop: atomic<bool>
+            - epoll: EpollWrapper
+            + Server(int port, const string& staticFolder, int threadCount)
+            + start(): void
+            + stop(): void
+            - handleClient(int client_socket, const string& clientIp): void
+            - closeConnection(int client_socket): void
+            - logRequest(int client_socket, const string& message): void
+        }
+        note top of Server
+            Central server component that orchestrates
+            all other components and manages the
+            lifecycle of client connections
+        end note
+
+        class Socket <<Core>> {
+            - server_fd: int
+            - port: int
+            + Socket(int port)
+            + ~Socket()
+            + bind(): void
+            + listen(): void
+            + closeSocket(): void
+            + acceptConnection(string& clientIp): int
+            + getSocketFd() const: int
+            + {static} durationToString(chrono::steady_clock::duration& duration): string
+        }
+
+        class Router <<Core>> {
+            - staticFolder: string
+            + Router(const string& staticFolder)
+            + route(const string& path, int client_socket, const string& clientIp, Middleware* middleware): void
+            + getStaticFolder() const: string
+            - getMimeType(const string& path): string
+            - readFileContent(const string& filePath): string
+            - readBinaryFile(const string& filePath, string& content): bool
+        }
+        note right of Router
+            Handles request routing and serves
+            static files with proper MIME types
+        end note
     }
 
-    class Socket <<Core>> {
-        - server_fd: int
-        - port: int
-        + Socket(int port)
-        + ~Socket()
-        + bind(): void
-        + listen(): void
-        + closeSocket(): void
-        + acceptConnection(string& clientIp): int
-        + getSocketFd() const: int
-        + {static} durationToString(chrono::steady_clock::duration& duration): string
-    }
+    together {
+        class ThreadPool <<Core>> {
+            - workers: vector<thread>
+            - tasks: queue<function<void()>>
+            - queueMutex: mutex
+            - condition: condition_variable
+            - stop_flag: atomic<bool>
+            + ThreadPool(size_t numThreads)
+            + ~ThreadPool()
+            + enqueue(function<void()> task): void
+            + stop(): void
+            - workerThread(): void
+        }
+        note left of ThreadPool
+            Manages worker threads for handling
+            concurrent client connections
+        end note
 
-    class Router <<Core>> {
-        - staticFolder: string
-        + Router(const string& staticFolder)
-        + route(const string& path, int client_socket, const string& clientIp): void
-        + getStaticFolder() const: string
-        - getMimeType(const string& path): string
-        - readFileContent(const string& filePath): string
-        - readBinaryFile(const string& filePath, string& content): bool
-    }
+        class Logger <<Core>> {
+            - {static} instance: Logger*
+            - logFile: ofstream
+            - logMutex: mutex
+            - isWaitingForEvents: bool
+            - lastEventWaitLog: chrono::steady_clock::time_point
+            - EVENT_WAIT_LOG_INTERVAL: chrono::seconds
+            - Logger()
+            - getTimestamp(): string
+            + {static} getInstance(): Logger*
+            + {static} destroyInstance(): void
+            + ~Logger()
+            + log(const string& message, const string& level, const string& ip): void
+            + error(const string& message, const string& ip): void
+            + warning(const string& message, const string& ip): void
+            + info(const string& message, const string& ip): void
+            + success(const string& message, const string& ip): void
+        }
 
-    class Server <<Core>> {
-        - socket: Socket
-        - router: Router
-        - pool: ThreadPool
-        - connectionsMutex: mutex
-        - connections: map<int, ConnectionInfo>
-        - shouldStop: atomic<bool>
-        - epoll: EpollWrapper
-        + Server(int port, const string& staticFolder, int threadCount)
-        + start(): void
-        + stop(): void
-        - handleClient(int client_socket, const string& clientIp): void
-        - closeConnection(int client_socket): void
-        - logRequest(int client_socket, const string& message): void
-    }
-
-    class Logger <<Core>> {
-        - {static} instance: Logger*
-        - logFile: ofstream
-        - logMutex: mutex
-        - isWaitingForEvents: bool
-        - lastEventWaitLog: chrono::steady_clock::time_point
-        - EVENT_WAIT_LOG_INTERVAL: chrono::seconds
-        - Logger()
-        - getTimestamp(): string
-        + {static} getInstance(): Logger*
-        + {static} destroyInstance(): void
-        + ~Logger()
-        + log(const string& message, const string& level, const string& ip): void
-        + error(const string& message, const string& ip): void
-        + warning(const string& message, const string& ip): void
-        + info(const string& message, const string& ip): void
-        + success(const string& message, const string& ip): void
-    }
-
-    class EpollWrapper <<Core>> {
-        - epoll_fd: int
-        + EpollWrapper()
-        + ~EpollWrapper()
-        + EpollWrapper(EpollWrapper&& other) noexcept
-        + EpollWrapper& operator=(EpollWrapper&& other) noexcept
-        + get() const: int
-        + wait(epoll_event* events, int maxEvents, int timeout): int
-        + add(int fd, uint32_t events): void
-        + modify(int fd, uint32_t events): void
-        + remove(int fd): void
+        class EpollWrapper <<Core>> {
+            - epoll_fd: int
+            + EpollWrapper()
+            + ~EpollWrapper()
+            + EpollWrapper(EpollWrapper&& other) noexcept
+            + EpollWrapper& operator=(EpollWrapper&& other) noexcept
+            + get() const: int
+            + wait(epoll_event* events, int maxEvents, int timeout): int
+            + add(int fd, uint32_t events): void
+            + modify(int fd, uint32_t events): void
+            + remove(int fd): void
+        }
+        note right of EpollWrapper
+            Wrapper for Linux epoll functionality
+            Handles event-driven I/O multiplexing
+        end note
     }
 }
 
+' Utility classes on the right
 package "Utility Classes" {
-    class Http <<Utility>> {
-        + {static} getRequestPath(const string& request): string
-        + {static} sendResponse(int client_socket, const string& content, const string& mimeType, int statusCode, const string& clientIp, bool isIndex): void
-        + {static} isAssetRequest(const string& path): bool
+    together {
+        class Http <<Utility>> {
+            + {static} getRequestPath(const string& request): string
+            + {static} sendResponse(int client_socket, const string& content, const string& mimeType, int statusCode, const string& clientIp, bool isIndex, Middleware* middleware): void
+            + {static} isAssetRequest(const string& path): bool
+        }
+
+        class Parser <<Utility>> {
+            + {static} parseConfig(const string& configFilePath): Config
+        }
+
+        class TerminalUtils <<Utility>> {
+            + {static} success(const string& msg): string
+            + {static} error(const string& msg): string
+            + {static} info(const string& msg): string
+            + {static} warning(const string& msg): string
+            + {static} highlight(const string& msg): string
+            + {static} step(int num, const string& msg): string
+        }
     }
 
-    class Parser <<Utility>> {
-        + {static} parseConfig(const string& configFilePath): Config
-    }
+    together {
+        abstract class Middleware <<Utility>> {
+            + process(const string& data): string
+        }
+        note left of Middleware
+            Abstract base class for all middleware
+            Components can be chained for request/response processing
+        end note
 
-    class TerminalUtils <<Utility>> {
-        + {static} success(const string& msg): string
-        + {static} error(const string& msg): string
-        + {static} info(const string& msg): string
-        + {static} warning(const string& msg): string
-        + {static} highlight(const string& msg): string
-        + {static} step(int num, const string& msg): string
+        class RateLimiter <<Utility>> {
+            - maxRequests: size_t
+            - timeWindow: chrono::seconds
+            - clientRequests: unordered_map<string, deque<chrono::steady_clock::time_point>>
+            - rateMutex: mutex
+            + RateLimiter(size_t maxRequests, chrono::seconds timeWindow)
+            + process(const string& data): string
+        }
+
+        class Compression <<Utility>> {
+            + {static} shouldCompress(const string& mimeType, size_t contentLength): bool
+            + {static} clientAcceptsGzip(const string& request): bool
+            + process(const string& data): string
+            - compressData(const string& data): string
+        }
+        note right of Compression
+            Handles gzip compression for responses
+            Based on content type and size
+        end note
     }
 }
 
@@ -156,7 +218,7 @@ Server "1" *-- "1" ThreadPool : delegates tasks to >
 Server "1" o-- "0..*" ConnectionInfo : tracks >
 Server "1" *-- "1" EpollWrapper : uses >
 
-' Config dependencies
+' Configuration dependencies
 Server ..> Config : configured by >
 
 ' Utility dependencies
@@ -167,16 +229,27 @@ Socket ..> Logger : logs operations >
 Router ..> Logger : logs access >
 Router ..> Http : uses >
 Logger ..> TerminalUtils : formats with >
+Router ..> Middleware : uses >
+Server ..> RateLimiter : uses >
+Server ..> Compression : uses >
 
-' Configuration flow
-Parser ..> TerminalUtils : uses for output >
+' Inheritance relationships
+RateLimiter --|> Middleware
+Compression --|> Middleware
 
 ' Layout hints
-Config -[hidden]-> Http
-Http -[hidden]-> Parser
-TerminalUtils -[hidden]-> Logger
+Config -[hidden]down-> ConnectionInfo
+Socket -[hidden]right-> Router
+Http -[hidden]right-> Parser
+TerminalUtils -[hidden]down-> Middleware
 
-legend right
+note "Thread-safe singleton pattern\nHandles all system logging" as LoggerNote
+Logger .. LoggerNote
+
+note "Middleware chain can be configured\nat runtime for flexible processing" as MiddlewareNote
+Middleware .. MiddlewareNote
+
+legend bottom
     |= Color |= Component Type |= Purpose |
     |<#LightGreen>| Configuration |Configuration structures|
     |<#LightBlue>| Core Components |Server functionality|
