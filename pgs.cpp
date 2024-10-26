@@ -20,6 +20,7 @@
 #include <map>                // For storing connection info
 #include <deque>              // For rate limiting
 #include <unordered_map>      // For rate limiting
+#include <unordered_set>      // For asset requests
 #include <chrono>             // For time measurement
 #include <csignal>            // Signal handling
 #include <atomic>             // Atomic bool flag
@@ -566,29 +567,31 @@ public:
                              Middleware *middleware = nullptr);
     static bool isAssetRequest(const std::string &path)
     {
-        static const std::vector<std::string> assetExtensions = {
+        // undordered_set is faster than vector for lookups
+        static const std::unordered_set<std::string> assetExtensions = {
             ".css", ".js", ".png", ".jpg", ".jpeg", ".gif", ".ico",
             ".svg", ".woff", ".woff2", ".ttf", ".eot", ".map",
             ".webp", ".pdf", ".mp4", ".webm", ".mp3", ".wav",
             ".json", ".xml"};
 
-        static const std::vector<std::string> assetDirs = {
+        static const std::unordered_set<std::string> assetDirs = {
             "/assets/", "/static/", "/images/", "/img/",
             "/css/", "/js/", "/fonts/", "/media/"};
 
         // Check if the path ends with an asset extension
         for (const auto &ext : assetExtensions)
         {
-            if (path.length() > ext.length() &&
-                path.substr(path.length() - ext.length()) == ext)
+            if (path.length() >= ext.length() &&
+                path.compare(path.length() - ext.length(), ext.length(), ext) == 0) // compare file extension
             {
                 return true;
             }
         }
 
+        // Check if the path contains an asset directory
         for (const auto &dir : assetDirs)
         {
-            if (path.find(dir) != std::string::npos)
+            if (path.find(dir) != std::string::npos) // check if the path contains an asset directory
             {
                 return true;
             }
@@ -603,7 +606,7 @@ std::string Http::getRequestPath(const std::string &request)
 {
     size_t pos1 = request.find("GET ");
     size_t pos2 = request.find(" HTTP/");
-    if (pos1 == std::string::npos || pos2 == std::string::npos)
+    if (pos1 == std::string::npos || pos2 == std::string::npos) // Check if the request is valid
     {
         return "/";
     }
@@ -759,31 +762,20 @@ std::string Router::readFileContent(const std::string &filePath)
 {
     std::string mimeType = getMimeType(filePath);
     bool isBinary = (mimeType.find("image/") != std::string::npos ||
-                     mimeType.find("application/") != std::string::npos);
+                     mimeType.find("application/") != std::string::npos); // Check if the file is binary
 
-    if (isBinary)
-    {
-        std::string content;
-        if (!readBinaryFile(filePath, content))
-        {
-            Logger::getInstance()->error("Failed to read binary file: " + filePath);
-            return "";
-        }
-        return content;
-    }
-
-    // Text file handling
-    std::ifstream file(filePath);
+    std::ifstream file(filePath, isBinary ? std::ios::binary : std::ios::in); // Open file in binary mode if it's a binary file
     if (!file.is_open())
     {
+        Logger::getInstance()->error("Failed to open file: " + filePath);
         return "";
     }
 
     try
     {
-        std::stringstream buffer; // read file content into a string stream
-        buffer << file.rdbuf();
-        return buffer.str();
+        std::ostringstream buffer;
+        buffer << file.rdbuf(); // Read file content into a string stream
+        return buffer.str();    // Return file content as a string
     }
     catch (const std::exception &e)
     {
@@ -959,10 +951,10 @@ public:
 
     void add(int fd, uint32_t events)
     {
-        struct epoll_event ev;
+        struct epoll_event ev = {};
         ev.events = events;
         ev.data.fd = fd;
-        if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &ev) == -1) // add fd to epoll
+        if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &ev) == -1)
         {
             throw std::runtime_error("Failed to add fd to epoll: " + std::string(strerror(errno)));
         }
@@ -970,7 +962,7 @@ public:
 
     void modify(int fd, uint32_t events)
     {
-        struct epoll_event ev;
+        struct epoll_event ev = {};
         ev.events = events;
         ev.data.fd = fd;
         if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) == -1) // modify fd in epoll
@@ -981,7 +973,7 @@ public:
 
     void remove(int fd)
     {
-        if (epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, nullptr) == -1)
+        if (epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, nullptr) == -1) // remove fd from epoll
         {
             throw std::runtime_error("Failed to remove fd from epoll: " + std::string(strerror(errno)));
         }
