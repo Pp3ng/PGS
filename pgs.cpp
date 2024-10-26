@@ -758,29 +758,45 @@ bool Router::readBinaryFile(const std::string &filePath, std::string &content)
     return true;
 }
 
+[[nodiscard]]
 std::string Router::readFileContent(const std::string &filePath)
 {
     std::string mimeType = getMimeType(filePath);
     bool isBinary = (mimeType.find("image/") != std::string::npos ||
-                     mimeType.find("application/") != std::string::npos); // Check if the file is binary
+                     mimeType.find("application/") != std::string::npos); // check if the file is binary
 
-    std::ifstream file(filePath, isBinary ? std::ios::binary : std::ios::in); // Open file in binary mode if it's a binary file
+    std::ifstream file(filePath, isBinary ? std::ios::binary : std::ios::in); // open file in binary mode if it's a binary file
     if (!file.is_open())
     {
         Logger::getInstance()->error("Failed to open file: " + filePath);
-        return "";
+        return ""; // return empty string
     }
 
     try
     {
-        std::ostringstream buffer;
-        buffer << file.rdbuf(); // Read file content into a string stream
-        return buffer.str();    // Return file content as a string
+        // use a string to store content
+        std::string content;
+        // read the entire file content into a string
+        file.seekg(0, std::ios::end);   // move to the end of the file
+        size_t fileSize = file.tellg(); // get the file size
+        file.seekg(0, std::ios::beg);   // move back to the beginning
+
+        content.resize(fileSize);         // resize the string to hold the content
+        file.read(&content[0], fileSize); // read file content into the string
+
+        // check if the read was successful
+        if (!file)
+        {
+            Logger::getInstance()->error("Failed to read complete file: " + filePath);
+            return ""; // return empty string
+        }
+
+        return content; // return file content as a string
     }
     catch (const std::exception &e)
     {
         Logger::getInstance()->error("Failed to read file: " + filePath + " - " + e.what());
-        return "";
+        return ""; // return empty string
     }
 }
 
