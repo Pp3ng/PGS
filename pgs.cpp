@@ -625,7 +625,38 @@ void Http::sendResponse(int client_socket, const std::string &content,
     }
 
     std::ostringstream headers;
-    headers << "HTTP/1.1 " << statusCode << " OK\r\n"
+    headers << "HTTP/1.1 " << statusCode << " ";
+
+    // Add new status codes and messages here
+    switch (statusCode)
+    {
+    case 200:
+        headers << "OK";
+        break;
+    case 404:
+        headers << "Not Found";
+        break;
+    case 500:
+        headers << "Internal Server Error";
+        break;
+    case 400:
+        headers << "Bad Request";
+        break;
+    case 401:
+        headers << "Unauthorized";
+        break;
+    case 403:
+        headers << "Forbidden";
+        break;
+    case 503:
+        headers << "Service Unavailable";
+        break;
+    default:
+        headers << "Unknown Status";
+        break;
+    }
+
+    headers << "\r\n"
             << "Content-Type: " << mimeType << "\r\n"
             << "Content-Length: " << responseContent.size() << "\r\n";
 
@@ -1090,7 +1121,7 @@ void Server::handleClient(int client_socket, const std::string &clientIp)
 
     static RateLimiter rateLimiter(10, std::chrono::seconds(60)); // 10 requests per 60 seconds
 
-    while ((valread = read(client_socket, buffer.data(), buffer.size())) > 0)
+    while ((valread = read(client_socket, buffer.data(), buffer.size())) > 0) // Read data from client
     {
         if (shouldStop)
         {
