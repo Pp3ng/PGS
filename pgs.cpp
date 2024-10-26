@@ -616,51 +616,49 @@ void Http::sendResponse(int client_socket, const std::string &content,
 {
     std::string responseContent = content;
     bool isCompressed = false;
+    size_t contentLength = responseContent.size(); // Cache content size
 
     // Apply middleware if provided and client accepts gzip
-    if (middleware && Compression::shouldCompress(mimeType, content.size()))
+    if (middleware && Compression::shouldCompress(mimeType, contentLength))
     {
         responseContent = middleware->process(content);
         isCompressed = true;
+        contentLength = responseContent.size(); // Update content size after compression
     }
 
-    std::ostringstream headers;
-    headers << "HTTP/1.1 " << statusCode << " ";
-
-    // Add new status codes and messages here
+    // Define status messages
+    const char *statusMessage = "Unknown Status";
     switch (statusCode)
     {
     case 200:
-        headers << "OK";
+        statusMessage = "OK";
         break;
     case 404:
-        headers << "Not Found";
+        statusMessage = "Not Found";
         break;
     case 500:
-        headers << "Internal Server Error";
+        statusMessage = "Internal Server Error";
         break;
     case 400:
-        headers << "Bad Request";
+        statusMessage = "Bad Request";
         break;
     case 401:
-        headers << "Unauthorized";
+        statusMessage = "Unauthorized";
         break;
     case 403:
-        headers << "Forbidden";
+        statusMessage = "Forbidden";
         break;
     case 503:
-        headers << "Service Unavailable";
-        break;
-    default:
-        headers << "Unknown Status";
+        statusMessage = "Service Unavailable";
         break;
     }
 
-    headers << "\r\n"
+    std::ostringstream headers;
+    headers << "HTTP/1.1 " << statusCode << " " << statusMessage << "\r\n"
             << "Content-Type: " << mimeType << "\r\n"
-            << "Content-Length: " << responseContent.size() << "\r\n";
+            << "Content-Length: " << contentLength << "\r\n";
 
-    if (isCompressed) // Add Content-Encoding header if content is compressed
+    if (isCompressed)
     {
         headers << "Content-Encoding: gzip\r\n";
     }
@@ -668,8 +666,8 @@ void Http::sendResponse(int client_socket, const std::string &content,
     headers << "\r\n";
 
     std::string headerStr = headers.str();
-    ssize_t headersSent = send(client_socket, headerStr.c_str(), headerStr.size(), 0);             // Send the headers
-    ssize_t contentSent = send(client_socket, responseContent.c_str(), responseContent.size(), 0); // Send the content
+    ssize_t headersSent = send(client_socket, headerStr.c_str(), headerStr.size(), 0);    // Send the headers
+    ssize_t contentSent = send(client_socket, responseContent.c_str(), contentLength, 0); // Send the content
 
     size_t totalSent = (headersSent > 0 ? headersSent : 0) +
                        (contentSent > 0 ? contentSent : 0); // Calculate total bytes sent
@@ -708,19 +706,27 @@ private:
 [[nodiscard]]
 std::string Router::getMimeType(const std::string &path) // calculate MIME type based on file extension
 {
-    if (path.rfind(".html") == path.length() - 5)
-        return "text/html";
-    if (path.rfind(".css") == path.length() - 4)
-        return "text/css";
-    if (path.rfind(".js") == path.length() - 3)
-        return "application/javascript";
-    if (path.rfind(".png") == path.length() - 4)
-        return "image/png";
-    if (path.rfind(".jpg") == path.length() - 4 || path.rfind(".jpeg") == path.length() - 5)
-        return "image/jpeg";
-    if (path.rfind(".gif") == path.length() - 4)
-        return "image/gif";
-    return "text/plain";
+    // Define a map of file extensions to MIME types
+    static const std::unordered_map<std::string, std::string> mimeTypes = {
+        {".html", "text/html"},
+        {".css", "text/css"},
+        {".js", "application/javascript"},
+        {".png", "image/png"},
+        {".jpg", "image/jpeg"},
+        {".jpeg", "image/jpeg"},
+        {".gif", "image/gif"}};
+
+    // Iterate through the map to find the appropriate MIME type
+    for (const auto &entry : mimeTypes)
+    {
+        if (path.length() >= entry.first.length() &&
+            path.compare(path.length() - entry.first.length(), entry.first.length(), entry.first) == 0) // compare file extension
+        {
+            return entry.second; // return MIME type
+        }
+    }
+
+    return "text/plain"; // Default MIME type
 }
 
 bool Router::readBinaryFile(const std::string &filePath, std::string &content)
