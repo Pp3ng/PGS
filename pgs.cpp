@@ -1,3 +1,12 @@
+/*
+ * File: pgs.cpp
+ * Author:Z.LuoPeng
+ * Date: 2024/10/~~~~~~
+ * Description: A static file server with middlewares, rate limiting, and caching
+ *
+ * 42 is the ultimate answer to life, the universe, and everything!!
+ */
+
 #include <iostream>           // std::cout, std::cerr
 #include <cstring>            // strlen()
 #include <sys/socket.h>       // socket(), bind(), listen(), accept()
@@ -32,7 +41,7 @@
 #include <sys/stat.h>         // fstat
 #include <sys/uio.h>          // writev
 #include <sys/mman.h>         // mmap
-#include "include/terminal_utils.h"
+#include "terminal_utils.h"
 
 namespace fs = std::filesystem; // Alias for filesystem namespace
 using json = nlohmann::json;    // Alias for JSON namespace
@@ -42,6 +51,11 @@ struct Config
     int port;                 // prot for server
     std::string staticFolder; // path for static files
     int threadCount;          // thread count of worker threads
+    struct
+    {
+        int maxRequests; // Maximum number of requests allowed within the time window
+        int timeWindow;  // Duration of the time window for rate limiting
+    } rateLimit;
 };
 
 // Connection information structure
@@ -1023,7 +1037,10 @@ public:
 
 Config Parser::parseConfig(const std::string &configFilePath)
 {
+    // Log the start of configuration reading process
     Logger::getInstance()->info("Reading configuration from: " + configFilePath);
+
+    // Open the configuration file
     std::ifstream file(configFilePath);
     if (!file.is_open())
     {
@@ -1031,6 +1048,7 @@ Config Parser::parseConfig(const std::string &configFilePath)
         throw std::runtime_error("Could not open config file!");
     }
 
+    // Parse the JSON configuration
     json configJson;
     try
     {
@@ -1042,38 +1060,70 @@ Config Parser::parseConfig(const std::string &configFilePath)
         throw std::runtime_error("Failed to parse configuration file");
     }
 
-    // Check if required fields exist and are not null
+    // Check if all required fields exist and are not null
+    // This includes the new rate_limit fields
     if (!configJson.contains("port") || configJson["port"].is_null() ||
         !configJson.contains("static_folder") || configJson["static_folder"].is_null() ||
-        !configJson.contains("thread_count") || configJson["thread_count"].is_null())
+        !configJson.contains("thread_count") || configJson["thread_count"].is_null() ||
+        !configJson.contains("rate_limit") || configJson["rate_limit"].is_null() ||
+        !configJson["rate_limit"].contains("max_requests") || configJson["rate_limit"]["max_requests"].is_null() ||
+        !configJson["rate_limit"].contains("time_window") || configJson["rate_limit"]["time_window"].is_null())
     {
         Logger::getInstance()->error("Configuration file is missing required fields or contains null values");
         throw std::runtime_error("Incomplete configuration file");
     }
 
+    // Create a Config object and populate it with values from the JSON
     Config config;
     config.port = configJson["port"];
     config.staticFolder = configJson["static_folder"];
     config.threadCount = configJson["thread_count"];
+    config.rateLimit.maxRequests = configJson["rate_limit"]["max_requests"];
+    config.rateLimit.timeWindow = configJson["rate_limit"]["time_window"];
 
-    // Add robust configuration validation
+    // Validate the port number
+    // Valid port numbers are between 1 and 65535
     if (config.port <= 0 || config.port > 65535)
     {
         Logger::getInstance()->error("Invalid port number: " + std::to_string(config.port));
         throw std::runtime_error("Invalid port number");
     }
+
+    // Check if the specified static folder exists
     if (!fs::exists(config.staticFolder))
     {
         Logger::getInstance()->error("Static folder does not exist: " + config.staticFolder);
         throw std::runtime_error("Invalid static folder path");
     }
+
+    // Validate the thread count
+    // We allow between 1 and 1000 threads
     if (config.threadCount <= 0 || config.threadCount > 1000)
     {
         Logger::getInstance()->error("Invalid thread count: " + std::to_string(config.threadCount));
         throw std::runtime_error("Invalid thread count");
     }
 
+    // Validate the maximum requests for rate limiting
+    // This should be a positive number
+    if (config.rateLimit.maxRequests <= 0)
+    {
+        Logger::getInstance()->error("Invalid max requests for rate limiting: " + std::to_string(config.rateLimit.maxRequests));
+        throw std::runtime_error("Invalid max requests for rate limiting");
+    }
+
+    // Validate the time window for rate limiting
+    // This should be a positive number
+    if (config.rateLimit.timeWindow <= 0)
+    {
+        Logger::getInstance()->error("Invalid time window for rate limiting: " + std::to_string(config.rateLimit.timeWindow));
+        throw std::runtime_error("Invalid time window for rate limiting");
+    }
+
+    // Log successful configuration loading
     Logger::getInstance()->success("Configuration loaded successfully");
+
+    // Return the populated and validated Config object
     return config;
 }
 
@@ -1164,7 +1214,7 @@ private:
 class Server
 {
 public:
-    Server(int port, const std::string &staticFolder, int threadCount);
+    Server(int port, const std::string &staticFolder, int threadCount, int maxRequests, int timeWindow);
     void start();
     void stop();
 
@@ -1173,6 +1223,7 @@ private:
     Router router;                             // server router instance
     ThreadPool pool;                           // server thread pool
     EpollWrapper epoll;                        // server epoll instance
+    RateLimiter rateLimiter;                   // server rate limiter
     std::mutex connectionsMutex;               // mutex to protect connections map
     std::map<int, ConnectionInfo> connections; // map to store connection info
     std::atomic<bool> shouldStop{false};       // atomic flag to stop the server
@@ -1182,8 +1233,9 @@ private:
     void logRequest(int client_socket, const std::string &message);
 };
 
-Server::Server(int port, const std::string &staticFolder, int threadCount)
-    : socket(port), router(staticFolder), pool(threadCount)
+Server::Server(int port, const std::string &staticFolder, int threadCount, int maxRequests, int timeWindow)
+    : socket(port), router(staticFolder), pool(threadCount),
+      rateLimiter(maxRequests, std::chrono::seconds(timeWindow))
 {
     socket.bind();
     socket.listen();
@@ -1290,23 +1342,25 @@ void Server::stop()
 
 void Server::handleClient(int client_socket, const std::string &clientIp)
 {
-    std::vector<char> buffer(1024); // Initialize buffer
-    ssize_t valread;                // Initialize valread
-    std::string request;            // Initialize request string
-    bool connectionClosed = false;  // Initialize connectionClosed flag
+    std::vector<char> buffer(1024); // Initialize buffer for reading client data
+    ssize_t valread;                // Variable to store the number of bytes read
+    std::string request;            // String to accumulate the complete client request
+    bool connectionClosed = false;  // Flag to track if the connection has been closed
 
-    static RateLimiter rateLimiter(10, std::chrono::seconds(60)); // 10 requests per 60 seconds
-
-    while ((valread = read(client_socket, buffer.data(), buffer.size())) > 0) // Read data from client
+    // Read data from the client in a loop
+    while ((valread = read(client_socket, buffer.data(), buffer.size())) > 0)
     {
+        // Check if the server should stop processing
         if (shouldStop)
         {
             closeConnection(client_socket);
             return;
         }
 
+        // Append the read data to the request string
         request.append(buffer.data(), valread);
 
+        // Update the bytes received for this connection
         std::lock_guard<std::mutex> lock(connectionsMutex);
         auto it = connections.find(client_socket);
         if (it != connections.end())
@@ -1315,42 +1369,48 @@ void Server::handleClient(int client_socket, const std::string &clientIp)
         }
     }
 
-    // Check if connection is closed
+    // Check if the connection has been closed by the client
     if (valread == 0 || (valread < 0 && errno != EAGAIN && errno != EWOULDBLOCK))
     {
         closeConnection(client_socket);
         connectionClosed = true;
     }
 
-    if (!connectionClosed && !request.empty()) // Check if request is not empty
+    // Process the request if the connection is still open and we have received data
+    if (!connectionClosed && !request.empty())
     {
-        std::string path = Http::getRequestPath(request); // Get request path
+        std::string path = Http::getRequestPath(request); // Extract the request path
         bool isAsset = Http::isAssetRequest(path);        // Check if it's an asset request
 
-        if (!isAsset) // Log request if it's not an asset request
+        // Log non-asset requests
+        if (!isAsset)
         {
             logRequest(client_socket, "Processing request: " + path);
         }
 
-        // Process request with rate limiter
+        // Apply rate limiting to the request
         std::string processedRequest = rateLimiter.process(request);
 
+        // Check if the request was rate limited
         if (processedRequest == "HTTP/1.1 429 Too Many Requests\r\n"
                                 "Content-Type: text/plain\r\n"
                                 "Content-Length: 19\r\n"
                                 "\r\n"
                                 "Too Many Requests")
         {
-            // Send rate limit response
+            // Send the rate limit response to the client
             send(client_socket, processedRequest.c_str(), processedRequest.size(), 0);
         }
         else
         {
-            Compression compressionMiddleware;                                   // Create compression middleware
-            router.route(path, client_socket, clientIp, &compressionMiddleware); // Route request with middleware
+            // Create a compression middleware instance
+            Compression compressionMiddleware;
+            // Route the request with compression middleware
+            router.route(path, client_socket, clientIp, &compressionMiddleware);
         }
 
-        if (!isAsset) // Log request completion if it's not an asset request
+        // Log completion of non-asset requests
+        if (!isAsset)
         {
             logRequest(client_socket, "Request completed: " + path);
         }
@@ -1420,8 +1480,9 @@ int main(void)
 
     try
     {
-        Config config = Parser::parseConfig("pgs_conf.json");                                    // parse configuration file
-        server = std::make_unique<Server>(config.port, config.staticFolder, config.threadCount); // create server instance
+        Config config = Parser::parseConfig("pgs_conf.json"); // parse configuration file
+        server = std::make_unique<Server>(config.port, config.staticFolder, config.threadCount,
+                                          config.rateLimit.maxRequests, config.rateLimit.timeWindow); // create server instance
 
         std::thread serverThread([&]()
                                  { server->start(); }); // start server in a separate thread

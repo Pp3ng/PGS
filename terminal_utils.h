@@ -1,4 +1,6 @@
-// terminal_utils.h
+#ifndef TERMINAL_UTILS_H
+#define TERMINAL_UTILS_H
+
 #pragma once
 #include <string>
 
@@ -52,3 +54,5 @@ namespace TerminalUtils
         return CYAN + "[Step " + std::to_string(num) + "] " + msg + RESET;
     }
 }
+
+#endif // TERMINAL_UTILS_H

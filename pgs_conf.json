@@ -1,5 +1,9 @@
 {
     "port": 9527,
     "static_folder": "path/to/static",
-    "thread_count": 4
+    "thread_count": 4,
+    "rate_limit": {
+        "max_requests": 1000,
+        "time_window": 60
+    }
 }
