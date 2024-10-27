@@ -87,8 +87,8 @@ struct ConnectionInfo
 };
 class Logger
 {
-
 private:
+    // Basic logger members
     std::mutex logMutex;   // Mutex to protect log file access
     std::ofstream logFile; // Log file stream
     static Logger *instance;
@@ -96,31 +96,115 @@ private:
     std::chrono::steady_clock::time_point lastEventWaitLog;                  // Track last event wait log time
     static constexpr auto EVENT_WAIT_LOG_INTERVAL = std::chrono::seconds(5); // Log interval for waiting events
 
+    // Structure to hold log message data
+    struct LogMessage
+    {
+        std::string message;                             // The actual log message
+        std::string level;                               // Log level (INFO, ERROR, etc.)
+        std::string ip;                                  // IP address associated with the log
+        std::chrono::system_clock::time_point timestamp; // When the log was created
+
+        LogMessage(const std::string &msg, const std::string &lvl, const std::string &clientIp)
+            : message(msg), level(lvl), ip(clientIp),
+              timestamp(std::chrono::system_clock::now()) {}
+    };
+
+    // async logging members
+    std::queue<LogMessage> messageQueue; // queue to store pending log messages
+    std::mutex queueMutex;               // mutex to protect message queue
+    std::condition_variable queueCV;     // condition variable for queue synchronization
+    std::thread loggerThread;            // background thread for processing logs
+    std::atomic<bool> running{true};     // flag to control background thread
+
     Logger() : isWaitingForEvents(false)
     {
         logFile.open("pgs.log", std::ios::app); // Open log file in append mode
-        info("Logger initialized");
+        // start the background logging thread
+        loggerThread = std::thread(&Logger::processLogs, this);
+        // note: We deliberately don't call info() here to avoid recursion
+        writeLogMessage(LogMessage("Logger initialized", "INFO", "-"));
     }
 
-    [[nodiscard]]
-    std::string getTimestamp()
+    // process logs in background thread
+    void processLogs()
     {
-        auto now = std::chrono::system_clock::now();
-        auto time = std::chrono::system_clock::to_time_t(now);
+        while (running)
+        {
+            std::vector<LogMessage> messages; // batch of log messages to write
+            {
+                // wait for new messages or shutdown signal
+                std::unique_lock<std::mutex> lock(queueMutex);
+                queueCV.wait_for(lock, std::chrono::seconds(1),
+                                 [this]
+                                 { return !messageQueue.empty() || !running; });
+
+                // batch process up to 100 messages at once for better performance
+                while (!messageQueue.empty() && messages.size() < 100)
+                {
+                    messages.push_back(std::move(messageQueue.front()));
+                    messageQueue.pop();
+                }
+            }
+
+            // write batched messages to file
+            if (!messages.empty())
+            {
+                std::lock_guard<std::mutex> lock(logMutex);
+                for (const auto &msg : messages)
+                {
+                    writeLogMessage(msg);
+                }
+                logFile.flush();
+            }
+        }
+    }
+
+    // format and write a single log message
+    void writeLogMessage(const LogMessage &msg)
+    {
+        std::string logMessage = formatLogMessage(msg);
+
+        logFile << logMessage << std::endl;
+
+        // Output to console with appropriate color
+        if (msg.level == "ERROR")
+        {
+            std::cout << TerminalUtils::error(logMessage) << std::endl;
+        }
+        else if (msg.level == "WARNING")
+        {
+            std::cout << TerminalUtils::warning(logMessage) << std::endl;
+        }
+        else if (msg.level == "SUCCESS")
+        {
+            std::cout << TerminalUtils::success(logMessage) << std::endl;
+        }
+        else
+        {
+            std::cout << TerminalUtils::info(logMessage) << std::endl;
+        }
+    }
+
+    // format timestamp and log message
+    [[nodiscard]]
+    std::string formatLogMessage(const LogMessage &msg)
+    {
+        auto time = std::chrono::system_clock::to_time_t(msg.timestamp);
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                      now.time_since_epoch()) %
+                      msg.timestamp.time_since_epoch()) %
                   1000;
 
-        char timestamp[32];
-        std::strftime(timestamp, sizeof(timestamp), "[%Y-%m-%d %H:%M:%S]", std::localtime(&time)); // format timestamp
+        char timestamp[32]; // buffer for timestamp
+        std::strftime(timestamp, sizeof(timestamp), "[%Y-%m-%d %H:%M:%S]",
+                      std::localtime(&time)); // format timestamp
 
-        std::string result = timestamp;
-        result += "." + std::to_string(ms.count());
-        return result;
+        return std::string(timestamp) + "." + std::to_string(ms.count()) +
+               " [" + msg.level + "] [" + msg.ip + "] " + msg.message;
     }
 
 public:
-    static Logger *getInstance() // Singleton pattern
+    // singleton pattern implementation
+    static Logger *getInstance()
     {
         if (instance == nullptr)
         {
@@ -135,62 +219,57 @@ public:
         instance = nullptr;
     }
 
+    // ensure proper cleanup in destructor
     ~Logger()
     {
+        running = false;      // signal background thread to stop
+        queueCV.notify_one(); // wake up background thread
+
+        if (loggerThread.joinable())
+        {
+            loggerThread.join(); // wait for background thread to finish
+        }
+
         if (logFile.is_open())
         {
             logFile.close();
         }
     }
 
+    // main logging function
     void log(const std::string &message, const std::string &level = "INFO", const std::string &ip = "-")
     {
-        // Skip duplicate "Waiting for events" messages
+        // handle special case for "Waiting for events" messages
         if (message == "Waiting for events...")
         {
             std::lock_guard<std::mutex> lock(logMutex);
             auto now = std::chrono::steady_clock::now();
 
             if (!isWaitingForEvents ||
-                (now - lastEventWaitLog) >= EVENT_WAIT_LOG_INTERVAL) // Check if interval has passed
+                (now - lastEventWaitLog) >= EVENT_WAIT_LOG_INTERVAL) // check if interval has passed
             {
                 isWaitingForEvents = true;
                 lastEventWaitLog = now;
             }
             else
             {
-                return; // Skip logging if we're already waiting and interval hasn't passed
+                return; // skip logging if we're already waiting and interval hasn't passed
             }
         }
         else
         {
-            isWaitingForEvents = false; // Reset the waiting flag
+            isWaitingForEvents = false; // reset the waiting flag
         }
 
-        std::lock_guard<std::mutex> lock(logMutex);
-        std::string logMessage = getTimestamp() + " [" + level + "] [" + ip + "] " + message;
-
-        logFile << logMessage << std::endl; // Write log message to file
-        logFile.flush();                    // Flush the log file stream inmediately
-
-        if (level == "ERROR")
+        // queue the log message for async processing
         {
-            std::cout << TerminalUtils::error(logMessage) << std::endl;
+            std::lock_guard<std::mutex> lock(queueMutex);
+            messageQueue.emplace(message, level, ip);
         }
-        else if (level == "WARNING")
-        {
-            std::cout << TerminalUtils::warning(logMessage) << std::endl;
-        }
-        else if (level == "SUCCESS")
-        {
-            std::cout << TerminalUtils::success(logMessage) << std::endl;
-        }
-        else
-        {
-            std::cout << TerminalUtils::info(logMessage) << std::endl;
-        }
+        queueCV.notify_one(); // notify the background thread
     }
 
+    // convenience methods for different log levels
     void error(const std::string &message, const std::string &ip = "-")
     {
         log(message, "ERROR", ip);
@@ -212,7 +291,7 @@ public:
     }
 };
 
-Logger *Logger::instance = nullptr; // Initialize the static singleton instance
+Logger *Logger::instance = nullptr; // initialize the static singleton instance
 
 class Cache
 {
