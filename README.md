@@ -12,6 +12,10 @@ The server is built with a modular architecture, separating concerns into distin
 
 ![Usecase Diagram](diagram/server-usecase.png)
 
+## Benchmarking in a 2G RAM, 2 Core CPU server
+
+![Benchmarking](diagram/performance.png)
+
 ### Core Components
 
 1. **Server**: The main orchestrator that initializes and coordinates all components.
@@ -21,8 +25,11 @@ The server is built with a modular architecture, separating concerns into distin
 5. **Logger**: Thread-safe singleton logger for output formatting and logging.
 6. **EpollWrapper**: Wrapper for epoll-based I/O multiplexing.
 7. **Middleware**: Abstract class for request/response middleware.
+
    - **CompressionMiddleware**: Gzip compression middleware.
    - **RateLimitMiddleware**: Rate limiting middleware.
+
+8. **Cache**: LRU cache for storing static file contents.
 
 ### Utility Components
 
@@ -38,12 +45,16 @@ The server is built with a modular architecture, separating concerns into distin
 - ⚡ Epoll-based I/O multiplexing
 - 🔧 JSON-based configuration
 - 🎯 MIME type detection
+- 📡 A default nice 404 page
 - 🚀 Thread pool for efficient concurrency
 - 📌 Directory index support (serves index.html by default)
 - 🖥️ Colored terminal output
 - 🛡️ Rate limiting middleware
 - 📝 Robust error handling
 - 📈 Performance optimizations
+- 📦 Lightweight and modular design
+- 🛠️ Easy to configure and deploy
+- 📜 Detailed logging and error reporting
 
 ## Prerequisites
 
@@ -69,8 +80,16 @@ Create a `config.json` file in the server's root directory:
 ```json
 {
   "port": 9527,
-  "static_folder": "./path/to/static",
-  "thread_count": 4
+  "static_folder": "path/to/static",
+  "thread_count": 4,
+  "rate_limit": {
+    "max_requests": 1000,
+    "time_window": 60
+  },
+  "cache": {
+    "size_mb": 512,
+    "max_age_seconds": 3600
+  }
 }
 ```
 
@@ -79,6 +98,12 @@ Create a `config.json` file in the server's root directory:
 - `port`: Server listening port
 - `static_folder`: Directory containing static files to serve
 - `thread_count`: Number of worker threads in thread pool
+- `rate_limit`: Rate limiting configuration
+  - `max_requests`: Maximum requests allowed in `time_window`
+  - `time_window`: Time window in seconds for rate limiting
+- `cache`: Cache configuration
+  - `size_mb`: Maximum cache size in MB
+  - `max_age_seconds`: Maximum cache age in seconds
 
 ## Usage
 
@@ -97,7 +122,7 @@ The server will:
 
 ### sample
 
-![sample](sample.png)
+![sample](diagram/sample.png)
 
 ## Design Decisions
 
@@ -149,17 +174,37 @@ The server will:
    - Configurable thread count
 
 3. **Static File Serving**
+
    - Efficient file reading (binary and text)
    - MIME type detection
    - Directory traversal prevention
    - Compression support
    - Zero-copy file transfer (sendfile())
 
+4. **Rate Limiting**
+
+   - Prevents DDoS attacks
+   - Configurable rate limits
+   - Time window-based request tracking
+
+5. **Cache Mechanism**
+
+   - Reduces disk I/O
+   - Configurable cache size and age
+   - LRU cache eviction policy
+
 ### Response Codes
 
-- 200: Successful file retrieval
-- 404: File not found
-- 500: Server error
+- 200 OK
+- 304 Not Modified
+- 400 Bad Request
+- 401 Unauthorized
+- 403 Forbidden
+- 404 Not Found
+- 405 Method Not Allowed
+- 429 Too Many Requests
+- 500 Internal Server Error
+- 503 Service Unavailable
 
 ## Safety and Security
 
@@ -188,3 +233,7 @@ The server will:
 - [ ] HTTP/2 support
 - [ ] WebSocket support
 - [x] Rate limiting and DDoS protection
+- [x] Cache control and freshness headers
+- [x] Gzip compression middleware
+- [x] Directory indexing support
+- [x] MIME type detection

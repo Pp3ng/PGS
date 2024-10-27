@@ -18,6 +18,7 @@ rectangle "PGS Server System" {
         usecase "Set Socket Options" as UC22
         usecase "Create Dual-Stack Socket" as UC23
         usecase "Set Non-Blocking Mode" as UC24
+        usecase "Initialize Cache" as UC29
     }
 
     ' Server Operation
@@ -36,6 +37,8 @@ rectangle "PGS Server System" {
         usecase "Handle Non-Asset Request" as UC19
         usecase "Rate Limit Requests" as UC27
         usecase "Compress Responses" as UC28
+        usecase "Check Cache" as UC30
+        usecase "Update Cache" as UC31
     }
 
     ' File Operations
@@ -85,6 +88,7 @@ UC1 ..> UC2 : <<include>>
 UC1 ..> UC22 : <<include>>
 UC1 ..> UC23 : <<include>>
 UC1 ..> UC24 : <<include>>
+UC1 ..> UC29 : <<include>>
 
 UC3 ..> UC4 : <<include>>
 UC3 ..> UC12 : <<include>>
@@ -97,6 +101,7 @@ UC5 ..> UC8 : <<include>>
 UC5 ..> UC9 : <<include>>
 UC5 ..> UC27 : <<extend>>
 UC5 ..> UC28 : <<extend>>
+UC5 ..> UC30 : <<include>>
 
 UC6 ..> UC18 : <<include>>
 UC6 ..> UC19 : <<include>>
@@ -104,6 +109,7 @@ UC6 ..> UC19 : <<include>>
 UC7 ..> UC15 : <<include>>
 UC7 ..> UC16 : <<include>>
 UC7 ..> UC14 : <<include>>
+UC7 ..> UC31 : <<include>>
 
 UC8 ..> UC17 : <<extend>>
 
@@ -146,5 +152,8 @@ N6 .. UC9
 
 note "Ensures graceful shutdown with\nproper resource cleanup" as N7
 N7 .. UC10
+
+note "Implements caching mechanism for\nimproved performance" as N8
+N8 .. UC30
 
 @enduml

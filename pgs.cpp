@@ -32,6 +32,7 @@
 #include <unordered_map>      // For rate limiting
 #include <unordered_set>      // For asset requests
 #include <chrono>             // For time measurement
+#include <shared_mutex>       // Shared mutex
 #include <csignal>            // Signal handling
 #include <atomic>             // Atomic bool flag
 #include <zlib.h>             // zlib compression
@@ -56,6 +57,11 @@ struct Config
         int maxRequests; // Maximum number of requests allowed within the time window
         int timeWindow;  // Duration of the time window for rate limiting
     } rateLimit;
+    struct
+    {
+        size_t sizeMB;     // Maximum size of the cache in MB
+        int maxAgeSeconds; // Maximum age of cache entries in seconds
+    } cache;
 };
 
 // Connection information structure
@@ -207,6 +213,170 @@ public:
 };
 
 Logger *Logger::instance = nullptr; // Initialize the static singleton instance
+
+class Cache
+{
+private:
+    // Structure to hold cache entry data
+    struct CacheEntry
+    {
+        std::vector<char> data;                             // Actual content of the cached file
+        std::string mimeType;                               // MIME type of the cached content
+        time_t lastModified;                                // Last modification time of the file
+        std::chrono::steady_clock::time_point lastAccessed; // Last access time of this cache entry
+    };
+
+    std::unordered_map<std::string, CacheEntry> cache; // Main cache storage
+    mutable std::shared_mutex mutex;                   // Mutex for thread-safe operations
+    size_t maxSize;                                    // Maximum size of the cache in bytes
+    size_t currentSize;                                // Current size of the cache in bytes
+    std::chrono::seconds maxAge;                       // Maximum age of cache entries
+
+public:
+    // Constructor
+    explicit Cache(size_t maxSizeMB, std::chrono::seconds maxAge)
+        : maxSize(static_cast<size_t>(maxSizeMB) * 1024 * 1024),
+          currentSize(0),
+          maxAge(maxAge)
+    {
+        // Check for cache size overflow
+        if (maxSize / (1024 * 1024) != maxSizeMB)
+        {
+            throw std::overflow_error("Cache size overflow");
+        }
+    }
+
+    // Retrieve an item from the cache
+    bool get(const std::string &key, std::vector<char> &data, std::string &mimeType, time_t &lastModified)
+    {
+        std::shared_lock<std::shared_mutex> lock(mutex);
+        auto it = cache.find(key);
+        if (it != cache.end())
+        {
+            auto now = std::chrono::steady_clock::now();
+            // Check if the cache entry has expired
+            if (now - it->second.lastAccessed > maxAge)
+            {
+                return false; // Cache entry has expired
+            }
+            data = it->second.data;
+            mimeType = it->second.mimeType;
+            lastModified = it->second.lastModified;
+            it->second.lastAccessed = now; // Update last access time
+            return true;
+        }
+        return false; // Cache miss
+    }
+
+    // Add or update an item in the cache
+    void set(const std::string &key, const std::vector<char> &data, const std::string &mimeType, time_t lastModified)
+    {
+        std::unique_lock<std::shared_mutex> lock(mutex);
+
+        // If cache is full, remove oldest entries until there's enough space
+        while (currentSize + data.size() > maxSize && !cache.empty())
+        {
+            auto oldest = std::min_element(cache.begin(), cache.end(),
+                                           [](const auto &a, const auto &b)
+                                           {
+                                               return a.second.lastAccessed < b.second.lastAccessed;
+                                           });
+            currentSize -= oldest->second.data.size();
+            cache.erase(oldest);
+        }
+
+        // If the new entry is too large, don't cache it
+        if (data.size() > maxSize)
+        {
+            return;
+        }
+
+        // Add or update the cache entry
+        auto &entry = cache[key];
+        entry.data = data;
+        entry.mimeType = mimeType;
+        entry.lastModified = lastModified;
+        entry.lastAccessed = std::chrono::steady_clock::now();
+        currentSize += data.size();
+    }
+
+    // Clear all items from the cache
+    void clear()
+    {
+        std::unique_lock<std::shared_mutex> lock(mutex);
+        cache.clear();
+        currentSize = 0;
+    }
+
+    // Get the current size of the cache in bytes
+    size_t size() const
+    {
+        std::shared_lock<std::shared_mutex> lock(mutex);
+        return currentSize;
+    }
+
+    // Get the number of items in the cache
+    size_t count() const
+    {
+        std::shared_lock<std::shared_mutex> lock(mutex);
+        return cache.size();
+    }
+
+    // Get the maximum age of cache entries
+    std::chrono::seconds getMaxAge() const
+    {
+        return maxAge;
+    }
+
+    // Set a new maximum age for cache entries
+    void setMaxAge(std::chrono::seconds newMaxAge)
+    {
+        std::unique_lock<std::shared_mutex> lock(mutex);
+        maxAge = newMaxAge;
+    }
+
+    // Remove a specific item from the cache
+    bool remove(const std::string &key)
+    {
+        std::unique_lock<std::shared_mutex> lock(mutex);
+        auto it = cache.find(key);
+        if (it != cache.end())
+        {
+            currentSize -= it->second.data.size();
+            cache.erase(it);
+            return true;
+        }
+        return false;
+    }
+
+    // Check if an item exists in the cache and is not expired
+    bool exists(const std::string &key)
+    {
+        std::shared_lock<std::shared_mutex> lock(mutex);
+        auto it = cache.find(key);
+        if (it != cache.end())
+        {
+            auto now = std::chrono::steady_clock::now();
+            return (now - it->second.lastAccessed <= maxAge);
+        }
+        return false;
+    }
+
+    // Get cache statistics
+    struct CacheStats
+    {
+        size_t currentSize;
+        size_t maxSize;
+        size_t itemCount;
+        std::chrono::seconds maxAge;
+    };
+
+    CacheStats getStats() const
+    {
+        std::shared_lock<std::shared_mutex> lock(mutex);
+        return {currentSize, maxSize, cache.size(), maxAge};
+    }
+};
 
 class Middleware
 {
@@ -589,7 +759,7 @@ public:
     static void sendResponse(int client_socket, const std::string &content,
                              const std::string &mimeType, int statusCode,
                              const std::string &clientIp, bool isIndex = false,
-                             Middleware *middleware = nullptr);
+                             Middleware *middleware = nullptr, Cache *cache = nullptr);
     static bool isAssetRequest(const std::string &path)
     {
         // undordered_set is faster than vector for lookups
@@ -641,7 +811,7 @@ std::string Http::getRequestPath(const std::string &request)
 void Http::sendResponse(int client_socket, const std::string &filePath,
                         const std::string &mimeType, int statusCode,
                         const std::string &clientIp, bool isIndex,
-                        Middleware *middleware)
+                        Middleware *middleware, Cache *cache)
 {
     // Set socket options for keep-alive
     int keepAlive = 1;
@@ -668,49 +838,82 @@ void Http::sendResponse(int client_socket, const std::string &filePath,
         return; // return if setting socket options failed
     }
 
-    // openfile
-    int fd = open(filePath.c_str(), O_RDONLY);
-    if (fd == -1)
+    std::vector<char> fileContent;
+    size_t fileSize;
+    time_t lastModified;
+    bool cacheHit = false;
+
+    // Try to get content from cache
+    if (cache && statusCode == 200)
     {
-        Logger::getInstance()->error(
-            "Failed to open file: errno=" + std::to_string(errno),
-            clientIp);
-        return;
+        std::string cachedMimeType;
+        cacheHit = cache->get(filePath, fileContent, cachedMimeType, lastModified);
+        if (cacheHit)
+        {
+            fileSize = fileContent.size();
+            Logger::getInstance()->info("Cache hit for: " + filePath, clientIp);
+        }
     }
 
-    struct stat file_stat; // get file status
-    if (fstat(fd, &file_stat) == -1)
+    int fd = -1;
+    if (!cacheHit)
     {
-        Logger::getInstance()->error(
-            "Fstat failed: errno=" + std::to_string(errno),
-            clientIp);
-        close(fd);
-        return;
+        // openfile
+        fd = open(filePath.c_str(), O_RDONLY);
+        if (fd == -1)
+        {
+            Logger::getInstance()->error(
+                "Failed to open file: errno=" + std::to_string(errno),
+                clientIp);
+            return;
+        }
+
+        struct stat file_stat; // get file status
+        if (fstat(fd, &file_stat) == -1)
+        {
+            Logger::getInstance()->error(
+                "Fstat failed: errno=" + std::to_string(errno),
+                clientIp);
+            close(fd);
+            return;
+        }
+
+        fileSize = file_stat.st_size;
+        lastModified = file_stat.st_mtime;
     }
 
-    size_t fileSize = file_stat.st_size;
     bool isCompressed = false;
     std::string compressedContent;
 
     // compress the file content if middleware is provided and the file is compressible
     if (middleware && Compression::shouldCompress(mimeType, fileSize) && mimeType.find("image/") == std::string::npos)
     {
-        std::vector<char> buffer(fileSize);
-        ssize_t bytesRead = read(fd, buffer.data(), fileSize);
-        if (bytesRead != static_cast<ssize_t>(fileSize))
+        if (cacheHit)
         {
-            Logger::getInstance()->error(
-                "Read file failed: errno=" + std::to_string(errno),
-                clientIp);
-            close(fd);
-            return;
+            compressedContent = middleware->process(std::string(fileContent.begin(), fileContent.end())); // process the cached content
         }
+        else
+        {
+            std::vector<char> buffer(fileSize);
+            ssize_t bytesRead = read(fd, buffer.data(), fileSize);
+            if (bytesRead != static_cast<ssize_t>(fileSize)) // read the file content
+            {
+                Logger::getInstance()->error(
+                    "Read file failed: errno=" + std::to_string(errno),
+                    clientIp);
+                close(fd);
+                return;
+            }
 
-        compressedContent = middleware->process(std::string(buffer.begin(), buffer.end()));
+            compressedContent = middleware->process(std::string(buffer.begin(), buffer.end())); // process the file content
+        }
         isCompressed = true;
         fileSize = compressedContent.size();
-        close(fd);
-        fd = -1;
+        if (fd != -1)
+        {
+            close(fd);
+            fd = -1;
+        }
     }
 
     // assemble the response header
@@ -719,7 +922,7 @@ void Http::sendResponse(int client_socket, const std::string &filePath,
     struct tm *tm_info = gmtime(&now);
     strftime(timeBuffer, sizeof(timeBuffer), "%a, %d %b %Y %H:%M:%S GMT", tm_info);
 
-    tm_info = gmtime(&file_stat.st_mtime); // get last modified time of the file
+    tm_info = gmtime(&lastModified); // get last modified time of the file
     strftime(lastModifiedBuffer, sizeof(lastModifiedBuffer), "%a, %d %b %Y %H:%M:%S GMT", tm_info);
 
     const char *statusMessage; // status message
@@ -780,19 +983,24 @@ void Http::sendResponse(int client_socket, const std::string &filePath,
 
     // send header and (possibly) compressed content using writev
     struct iovec iov[2];                                     // iovec structure to send header and content
-    iov[0].iov_base = const_cast<char *>(headerStr.c_str()); // set the header data
-    iov[0].iov_len = headerStr.size();                       // set the header size
+    iov[0].iov_base = const_cast<char *>(headerStr.c_str()); // set header data
+    iov[0].iov_len = headerStr.size();                       // set header size
 
     if (isCompressed)
     {
-        iov[1].iov_base = const_cast<char *>(compressedContent.c_str());
-        iov[1].iov_len = compressedContent.size();
+        iov[1].iov_base = const_cast<char *>(compressedContent.c_str()); // set compressed content data
+        iov[1].iov_len = compressedContent.size();                       // set compressed content size
+    }
+    else if (cacheHit)
+    {
+        iov[1].iov_base = fileContent.data();
+        iov[1].iov_len = fileContent.size();
     }
 
     size_t totalSent = 0;
-    int iovcnt = isCompressed ? 2 : 1; // flag to track the number of iovec structures
+    int iovcnt = (isCompressed || cacheHit) ? 2 : 1; // flag to track the number of iovec structures
 
-    while (totalSent < headerStr.size() + (isCompressed ? compressedContent.size() : 0))
+    while (totalSent < headerStr.size() + (isCompressed ? compressedContent.size() : (cacheHit ? fileContent.size() : 0))) // send header and content
     {
         ssize_t sent = writev(client_socket, iov, iovcnt);
         if (sent <= 0)
@@ -814,7 +1022,7 @@ void Http::sendResponse(int client_socket, const std::string &filePath,
         // update iov and iovcnt to send remaining data
         while (sent > 0 && iovcnt > 0)
         {
-            if (static_cast<size_t>(sent) >= iov[0].iov_len)
+            if (static_cast<size_t>(sent) >= iov[0].iov_len) // check if the entire iovec data is sent
             {
                 sent -= iov[0].iov_len;
                 iovcnt--;
@@ -822,15 +1030,15 @@ void Http::sendResponse(int client_socket, const std::string &filePath,
             }
             else
             {
-                iov[0].iov_base = static_cast<char *>(iov[0].iov_base) + sent;
+                iov[0].iov_base = static_cast<char *>(iov[0].iov_base) + sent; // update the base pointer
                 iov[0].iov_len -= sent;
                 break;
             }
         }
     }
 
-    // if the file is not compressed and sendfile is supported, use sendfile to send the file
-    if (!isCompressed && fd != -1)
+    // if the file is not compressed and not from cache, use sendfile to send the file
+    if (!isCompressed && !cacheHit && fd != -1)
     {
         off_t offset = 0;
         bool useMmap = false;
@@ -907,6 +1115,18 @@ void Http::sendResponse(int client_socket, const std::string &filePath,
             munmap(mmapAddr, fileSize);
         }
 
+        // Update cache if needed
+        if (cache && statusCode == 200)
+        {
+            std::vector<char> content(fileSize);
+            lseek(fd, 0, SEEK_SET); // Reset file pointer to the beginning
+            ssize_t bytesRead = read(fd, content.data(), fileSize);
+            if (bytesRead == static_cast<ssize_t>(fileSize))
+            {
+                cache->set(filePath, content, mimeType, lastModified);
+            }
+        }
+
         close(fd);
     }
 
@@ -916,7 +1136,8 @@ void Http::sendResponse(int client_socket, const std::string &filePath,
             "Response sent: status=" + std::to_string(statusCode) +
                 ", path=" + filePath +
                 ", size=" + std::to_string(fileSize) +
-                "type=" + mimeType,
+                ", type=" + mimeType +
+                ", cache=" + (cacheHit ? "HIT" : "MISS"),
             clientIp);
     }
 }
@@ -928,7 +1149,7 @@ public:
     {
         Logger::getInstance()->info("Router initialized with static folder: " + staticFolder);
     }
-    void route(const std::string &path, int client_socket, const std::string &clientIp, Middleware *middleware);
+    void route(const std::string &path, int client_socket, const std::string &clientIp, Middleware *middleware, Cache *cache);
     [[nodiscard]]
     std::string getStaticFolder() const
     {
@@ -967,7 +1188,7 @@ std::string Router::getMimeType(const std::string &path) // calculate MIME type 
     return "text/plain"; // Default MIME type
 }
 
-void Router::route(const std::string &path, int client_socket, const std::string &clientIp, Middleware *middleware)
+void Router::route(const std::string &path, int client_socket, const std::string &clientIp, Middleware *middleware, Cache *cache)
 {
     std::string filePath = staticFolder + path;
     bool isIndex = (path == "/index.html" || path == "/" || fs::is_directory(filePath));
@@ -1026,7 +1247,7 @@ void Router::route(const std::string &path, int client_socket, const std::string
     }
 
     std::string mimeType = getMimeType(filePath);
-    Http::sendResponse(client_socket, filePath, mimeType, 200, clientIp, !isAsset && isIndex, middleware);
+    Http::sendResponse(client_socket, filePath, mimeType, 200, clientIp, !isAsset && isIndex, middleware, cache);
 }
 
 class Parser
@@ -1061,13 +1282,16 @@ Config Parser::parseConfig(const std::string &configFilePath)
     }
 
     // Check if all required fields exist and are not null
-    // This includes the new rate_limit fields
+    // This includes the new rate_limit fields and cache fields
     if (!configJson.contains("port") || configJson["port"].is_null() ||
         !configJson.contains("static_folder") || configJson["static_folder"].is_null() ||
         !configJson.contains("thread_count") || configJson["thread_count"].is_null() ||
         !configJson.contains("rate_limit") || configJson["rate_limit"].is_null() ||
         !configJson["rate_limit"].contains("max_requests") || configJson["rate_limit"]["max_requests"].is_null() ||
-        !configJson["rate_limit"].contains("time_window") || configJson["rate_limit"]["time_window"].is_null())
+        !configJson["rate_limit"].contains("time_window") || configJson["rate_limit"]["time_window"].is_null() ||
+        !configJson.contains("cache") || configJson["cache"].is_null() ||
+        !configJson["cache"].contains("size_mb") || configJson["cache"]["size_mb"].is_null() ||
+        !configJson["cache"].contains("max_age_seconds") || configJson["cache"]["max_age_seconds"].is_null())
     {
         Logger::getInstance()->error("Configuration file is missing required fields or contains null values");
         throw std::runtime_error("Incomplete configuration file");
@@ -1080,9 +1304,10 @@ Config Parser::parseConfig(const std::string &configFilePath)
     config.threadCount = configJson["thread_count"];
     config.rateLimit.maxRequests = configJson["rate_limit"]["max_requests"];
     config.rateLimit.timeWindow = configJson["rate_limit"]["time_window"];
+    config.cache.sizeMB = configJson["cache"]["size_mb"].get<size_t>();
+    config.cache.maxAgeSeconds = configJson["cache"]["max_age_seconds"].get<int>();
 
     // Validate the port number
-    // Valid port numbers are between 1 and 65535
     if (config.port <= 0 || config.port > 65535)
     {
         Logger::getInstance()->error("Invalid port number: " + std::to_string(config.port));
@@ -1097,7 +1322,6 @@ Config Parser::parseConfig(const std::string &configFilePath)
     }
 
     // Validate the thread count
-    // We allow between 1 and 1000 threads
     if (config.threadCount <= 0 || config.threadCount > 1000)
     {
         Logger::getInstance()->error("Invalid thread count: " + std::to_string(config.threadCount));
@@ -1105,7 +1329,6 @@ Config Parser::parseConfig(const std::string &configFilePath)
     }
 
     // Validate the maximum requests for rate limiting
-    // This should be a positive number
     if (config.rateLimit.maxRequests <= 0)
     {
         Logger::getInstance()->error("Invalid max requests for rate limiting: " + std::to_string(config.rateLimit.maxRequests));
@@ -1113,11 +1336,24 @@ Config Parser::parseConfig(const std::string &configFilePath)
     }
 
     // Validate the time window for rate limiting
-    // This should be a positive number
     if (config.rateLimit.timeWindow <= 0)
     {
         Logger::getInstance()->error("Invalid time window for rate limiting: " + std::to_string(config.rateLimit.timeWindow));
         throw std::runtime_error("Invalid time window for rate limiting");
+    }
+
+    // Validate cache size
+    if (config.cache.sizeMB <= 0 || config.cache.sizeMB > std::numeric_limits<size_t>::max() / (1024 * 1024))
+    {
+        Logger::getInstance()->error("Invalid cache size: " + std::to_string(config.cache.sizeMB) + " MB");
+        throw std::runtime_error("Invalid cache size");
+    }
+
+    // Validate cache max age
+    if (config.cache.maxAgeSeconds <= 0)
+    {
+        Logger::getInstance()->error("Invalid cache max age: " + std::to_string(config.cache.maxAgeSeconds) + " seconds");
+        throw std::runtime_error("Invalid cache max age");
     }
 
     // Log successful configuration loading
@@ -1214,7 +1450,7 @@ private:
 class Server
 {
 public:
-    Server(int port, const std::string &staticFolder, int threadCount, int maxRequests, int timeWindow);
+    Server(int port, const std::string &staticFolder, int threadCount, int maxRequests, int timeWindow, int cacheSizeMB, int maxAgeSeconds);
     void start();
     void stop();
 
@@ -1224,6 +1460,7 @@ private:
     ThreadPool pool;                           // server thread pool
     EpollWrapper epoll;                        // server epoll instance
     RateLimiter rateLimiter;                   // server rate limiter
+    Cache cache;                               // server cache
     std::mutex connectionsMutex;               // mutex to protect connections map
     std::map<int, ConnectionInfo> connections; // map to store connection info
     std::atomic<bool> shouldStop{false};       // atomic flag to stop the server
@@ -1233,10 +1470,21 @@ private:
     void logRequest(int client_socket, const std::string &message);
 };
 
-Server::Server(int port, const std::string &staticFolder, int threadCount, int maxRequests, int timeWindow)
-    : socket(port), router(staticFolder), pool(threadCount),
-      rateLimiter(maxRequests, std::chrono::seconds(timeWindow))
+Server::Server(int port, const std::string &staticFolder, int threadCount, int maxRequests, int timeWindow, int cacheSizeMB, int maxAgeSeconds)
+    : socket(port),
+      router(staticFolder),
+      pool(threadCount),
+      epoll(),
+      rateLimiter(maxRequests, std::chrono::seconds(timeWindow)),
+      cache(cacheSizeMB, std::chrono::seconds(maxAgeSeconds))
 {
+    Logger::getInstance()->info("Server initialized with port: " + std::to_string(port) +
+                                ", static folder: " + staticFolder +
+                                ", thread count: " + std::to_string(threadCount) +
+                                ", rate limit: " + std::to_string(maxRequests) +
+                                " requests per " + std::to_string(timeWindow) + " seconds" +
+                                ", cache size: " + std::to_string(cacheSizeMB) + "MB" +
+                                ", cache max age: " + std::to_string(maxAgeSeconds) + " seconds");
     socket.bind();
     socket.listen();
 }
@@ -1406,7 +1654,7 @@ void Server::handleClient(int client_socket, const std::string &clientIp)
             // Create a compression middleware instance
             Compression compressionMiddleware;
             // Route the request with compression middleware
-            router.route(path, client_socket, clientIp, &compressionMiddleware);
+            router.route(path, client_socket, clientIp, &compressionMiddleware, &cache);
         }
 
         // Log completion of non-asset requests
@@ -1482,7 +1730,8 @@ int main(void)
     {
         Config config = Parser::parseConfig("pgs_conf.json"); // parse configuration file
         server = std::make_unique<Server>(config.port, config.staticFolder, config.threadCount,
-                                          config.rateLimit.maxRequests, config.rateLimit.timeWindow); // create server instance
+                                          config.rateLimit.maxRequests, config.rateLimit.timeWindow,
+                                          config.cache.sizeMB, config.cache.maxAgeSeconds); // create server instance
 
         std::thread serverThread([&]()
                                  { server->start(); }); // start server in a separate thread

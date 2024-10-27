@@ -5,5 +5,9 @@
     "rate_limit": {
         "max_requests": 1000,
         "time_window": 60
+    },
+    "cache":{
+        "size_mb":512,
+        "max_age_seconds": 3600
     }
 }
