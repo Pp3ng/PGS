@@ -2,6 +2,7 @@
 #include <cstring>            // strlen()
 #include <sys/socket.h>       // socket(), bind(), listen(), accept()
 #include <arpa/inet.h>        // inet_ntoa
+#include <netinet/tcp.h>      // TCP_KEEPIDLE, TCP_KEEPINTVL, TCP_KEEPCNT
 #include <netinet/in.h>       // sockaddr_in
 #include <unistd.h>           // close() function
 #include <sys/epoll.h>        // Epoll model
@@ -27,6 +28,8 @@
 #include <zlib.h>             // zlib compression
 #include <algorithm>          // std::transform
 #include <stdexcept>          // std::runtime_error
+#include <sys/sendfile.h>     // sendfile
+#include <sys/stat.h>         // fstat
 #include "include/terminal_utils.h"
 
 namespace fs = std::filesystem; // Alias for filesystem namespace
@@ -613,34 +616,141 @@ std::string Http::getRequestPath(const std::string &request)
     return request.substr(pos1 + 4, pos2 - (pos1 + 4));
 }
 
-void Http::sendResponse(int client_socket, const std::string &content,
+void Http::sendResponse(int client_socket, const std::string &filePath,
                         const std::string &mimeType, int statusCode,
-                        const std::string &clientIp, bool isIndex, Middleware *middleware)
+                        const std::string &clientIp, bool isIndex,
+                        Middleware *middleware)
 {
-    std::string responseContent = content;
-    bool isCompressed = false;
-    size_t contentLength = responseContent.size(); // Cache content size
-
-    // Apply middleware if provided and client accepts gzip
-    if (middleware && Compression::shouldCompress(mimeType, contentLength))
+    // check if the file path is too long
+    if (filePath.length() >= PATH_MAX)
     {
-        responseContent = middleware->process(content);
-        isCompressed = true;
-        contentLength = responseContent.size(); // Update content size after compression
+        Logger::getInstance()->error(
+            "File path too long: length=" + std::to_string(filePath.length()) +
+                " max=" + std::to_string(PATH_MAX),
+            clientIp);
+        std::string errorResponse = "HTTP/1.1 400 Bad Request\r\n"
+                                    "Content-Type: text/plain\r\n"
+                                    "Content-Length: 21\r\n"
+                                    "Connection: keep-alive\r\n"
+                                    "\r\n"
+                                    "Error: Path too long\r\n";
+        send(client_socket, errorResponse.c_str(), errorResponse.length(), MSG_NOSIGNAL);
+        return;
     }
 
-    // Define status messages
-    const char *statusMessage = "Unknown Status";
+    // keep-alive
+    const struct
+    {
+        int level;
+        int option;
+        int value;
+        const char *name;
+    } sock_opts[] = {
+        {SOL_SOCKET, SO_KEEPALIVE, 1, "SO_KEEPALIVE"},
+        {IPPROTO_TCP, TCP_KEEPIDLE, 60, "TCP_KEEPIDLE"},
+        {IPPROTO_TCP, TCP_KEEPINTVL, 10, "TCP_KEEPINTVL"},
+        {IPPROTO_TCP, TCP_KEEPCNT, 3, "TCP_KEEPCNT"}};
+
+    for (const auto &opt : sock_opts)
+    {
+        if (setsockopt(client_socket, opt.level, opt.option, &opt.value, sizeof(opt.value)) < 0) // set socket options
+        {
+            Logger::getInstance()->error(
+                "Failed to set " + std::string(opt.name) + ": errno=" + std::to_string(errno),
+                clientIp);
+        }
+    }
+
+    // resolve the real path of the file
+    char realPath[PATH_MAX];
+    if (realpath(filePath.c_str(), realPath) == nullptr)
+    {
+        Logger::getInstance()->error(
+            "Failed to resolve real path: " + filePath + ", errno=" + std::to_string(errno),
+            clientIp);
+        return;
+    }
+
+    int fd = open(realPath, O_RDONLY); // open file
+    if (fd == -1)
+    {
+        Logger::getInstance()->error(
+            "Failed to open file: " + std::string(realPath) + ", errno=" + std::to_string(errno),
+            clientIp);
+        return;
+    }
+
+    struct stat file_stat;
+    if (fstat(fd, &file_stat) == -1) // get file status
+    {
+        Logger::getInstance()->error(
+            "Failed to get file stats: errno=" + std::to_string(errno),
+            clientIp);
+        close(fd);
+        return;
+    }
+
+    size_t fileSize = file_stat.st_size;
+    bool isCompressed = false;
+    std::string compressedContent;
+
+    // judge whether the file should be compressed
+    bool shouldSkipCompression = (mimeType.find("image/") != std::string::npos ||
+                                  mimeType.find("video/") != std::string::npos ||
+                                  mimeType.find("audio/") != std::string::npos ||
+                                  mimeType.find("application/pdf") != std::string::npos);
+
+    // compress the file content
+    if (!shouldSkipCompression && middleware && Compression::shouldCompress(mimeType, fileSize))
+    {
+        // limit file size to 10MB for compression
+        if (fileSize > 10 * 1024 * 1024)
+        {
+            Logger::getInstance()->warning(
+                "File too large for compression: " + std::to_string(fileSize) + " bytes",
+                clientIp);
+        }
+        else
+        {
+            std::vector<char> buffer(fileSize);
+            ssize_t bytesRead = read(fd, buffer.data(), fileSize);
+            if (bytesRead == static_cast<ssize_t>(fileSize)) // read file content
+            {
+                compressedContent = middleware->process(std::string(buffer.begin(), buffer.end())); // compress the file content
+                isCompressed = true;
+                fileSize = compressedContent.size(); // update the file size
+                close(fd);
+            }
+            else
+            {
+                Logger::getInstance()->error(
+                    "Failed to read file for compression: expected=" + std::to_string(fileSize) +
+                        " actual=" + std::to_string(bytesRead) + " errno=" + std::to_string(errno),
+                    clientIp);
+                close(fd);
+                return;
+            }
+        }
+    }
+
+    char timeBuffer[128];
+    time_t now = time(nullptr);
+    struct tm *tm_info = gmtime(&now);
+    strftime(timeBuffer, sizeof(timeBuffer), "%a, %d %b %Y %H:%M:%S GMT", tm_info); // for response header
+
+    char lastModifiedBuffer[128];
+    tm_info = gmtime(&file_stat.st_mtime);
+    strftime(lastModifiedBuffer, sizeof(lastModifiedBuffer), "%a, %d %b %Y %H:%M:%S GMT", tm_info);
+
+    // get the status message
+    const char *statusMessage;
     switch (statusCode)
     {
     case 200:
         statusMessage = "OK";
         break;
-    case 404:
-        statusMessage = "Not Found";
-        break;
-    case 500:
-        statusMessage = "Internal Server Error";
+    case 304:
+        statusMessage = "Not Modified";
         break;
     case 400:
         statusMessage = "Bad Request";
@@ -651,37 +761,190 @@ void Http::sendResponse(int client_socket, const std::string &content,
     case 403:
         statusMessage = "Forbidden";
         break;
+    case 404:
+        statusMessage = "Not Found";
+        break;
+    case 500:
+        statusMessage = "Internal Server Error";
+        break;
     case 503:
         statusMessage = "Service Unavailable";
         break;
+    default:
+        statusMessage = "Unknown Status";
+        break;
     }
 
+    // assemble response headers
     std::ostringstream headers;
     headers << "HTTP/1.1 " << statusCode << " " << statusMessage << "\r\n"
+            << "Server: RobustHTTP/1.0\r\n"
+            << "Date: " << timeBuffer << "\r\n"
             << "Content-Type: " << mimeType << "\r\n"
-            << "Content-Length: " << contentLength << "\r\n";
+            << "Content-Length: " << fileSize << "\r\n"
+            << "Last-Modified: " << lastModifiedBuffer << "\r\n"
+            << "Connection: keep-alive\r\n"
+            << "Keep-Alive: timeout=60, max=1000\r\n"
+            << "Accept-Ranges: bytes\r\n";
+
+    // add security headers
+    if (shouldSkipCompression)
+    {
+        headers << "Cache-Control: public, max-age=31536000\r\n"; // cache images, videos, audio, and PDFs for 1 year
+    }
+    else
+    {
+        headers << "Cache-Control: public, max-age=86400\r\n"; // other files are cached for 1 day
+    }
+
+    headers << "X-Content-Type-Options: nosniff\r\n"
+            << "X-Frame-Options: SAMEORIGIN\r\n"
+            << "X-XSS-Protection: 1; mode=block\r\n";
 
     if (isCompressed)
     {
-        headers << "Content-Encoding: gzip\r\n";
+        headers << "Content-Encoding: gzip\r\n"
+                << "Vary: Accept-Encoding\r\n";
     }
 
     headers << "\r\n";
-
     std::string headerStr = headers.str();
-    ssize_t headersSent = send(client_socket, headerStr.c_str(), headerStr.size(), 0);    // Send the headers
-    ssize_t contentSent = send(client_socket, responseContent.c_str(), contentLength, 0); // Send the content
 
-    size_t totalSent = (headersSent > 0 ? headersSent : 0) +
-                       (contentSent > 0 ? contentSent : 0); // Calculate total bytes sent
+    // send response headers
+    const int maxRetries = 3;
+    size_t headersSent = 0;
+    const char *headerPtr = headerStr.c_str();
+    size_t remainingHeaders = headerStr.size();
+    int retryCount = 0;
 
+    while (remainingHeaders > 0 && retryCount < maxRetries)
+    {
+        ssize_t sent = send(client_socket, headerPtr + headersSent, remainingHeaders, MSG_NOSIGNAL);
+        if (sent <= 0)
+        {
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+            {
+                usleep(1000);
+                retryCount++;
+                continue;
+            }
+            Logger::getInstance()->error(
+                "Failed to send headers: errno=" + std::to_string(errno),
+                clientIp);
+            if (!isCompressed)
+            {
+                close(fd);
+            }
+            return;
+        }
+        headersSent += sent;
+        remainingHeaders -= sent;
+        retryCount = 0;
+    }
+
+    if (retryCount >= maxRetries) // if max retries reached
+    {
+        Logger::getInstance()->error(
+            "Max retries reached while sending headers",
+            clientIp);
+        if (!isCompressed)
+        {
+            close(fd);
+        }
+        return;
+    }
+
+    size_t totalSent = headersSent;
+
+    // send file content
+    if (isCompressed)
+    {
+        // send compressed content
+        size_t contentSent = 0;
+        const char *contentPtr = compressedContent.c_str();
+        size_t remainingContent = fileSize;
+        retryCount = 0;
+
+        while (remainingContent > 0 && retryCount < maxRetries)
+        {
+            ssize_t sent = send(client_socket, contentPtr + contentSent, remainingContent, MSG_NOSIGNAL);
+            if (sent <= 0)
+            {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) // EAGAIN: Resource temporarily unavailable
+                {
+                    usleep(1000);
+                    retryCount++;
+                    continue;
+                }
+                Logger::getInstance()->error(
+                    "Failed to send compressed content: errno=" + std::to_string(errno),
+                    clientIp);
+                return;
+            }
+            contentSent += sent;
+            remainingContent -= sent;
+            retryCount = 0;
+        }
+        totalSent += contentSent;
+    }
+    else
+    {
+        // send original content by sendfile()
+        off_t offset = 0;
+        retryCount = 0;
+
+        while (offset < static_cast<off_t>(fileSize) && retryCount < maxRetries)
+        {
+            ssize_t sent = sendfile(client_socket, fd, &offset, fileSize - offset);
+            if (sent <= 0)
+            {
+                if (errno == EAGAIN || errno == EWOULDBLOCK)
+                {
+                    usleep(1000);
+                    retryCount++;
+                    continue;
+                }
+                else if (errno == EINVAL)
+                {
+                    // if not support sendfile, use read/write
+                    char buffer[8192];
+                    lseek(fd, offset, SEEK_SET);
+                    ssize_t readBytes = read(fd, buffer, sizeof(buffer));
+                    if (readBytes > 0)
+                    {
+                        ssize_t writtenBytes = send(client_socket, buffer, readBytes, MSG_NOSIGNAL);
+                        if (writtenBytes > 0)
+                        {
+                            offset += writtenBytes;
+                            retryCount = 0;
+                            continue;
+                        }
+                    }
+                }
+                Logger::getInstance()->error(
+                    "Failed to send file content: offset=" + std::to_string(offset) +
+                        " size=" + std::to_string(fileSize) +
+                        " errno=" + std::to_string(errno),
+                    clientIp);
+                close(fd);
+                return;
+            }
+            offset += sent;
+            retryCount = 0;
+        }
+        totalSent += fileSize;
+        close(fd);
+    }
+
+    // log response
     if (isIndex)
     {
         Logger::getInstance()->info(
             "Response sent: status=" + std::to_string(statusCode) +
                 ", size=" + std::to_string(totalSent) +
-                ", type=" + mimeType,
-            clientIp); // Log the response details
+                ", type=" + mimeType +
+                (isCompressed ? " (compressed)" : ""),
+            clientIp);
     }
 }
 
@@ -719,11 +982,10 @@ std::string Router::getMimeType(const std::string &path) // calculate MIME type 
         {".jpeg", "image/jpeg"},
         {".gif", "image/gif"}};
 
-    // Iterate through the map to find the appropriate MIME type
+    // Use ends_with to find the appropriate MIME type
     for (const auto &entry : mimeTypes)
     {
-        if (path.length() >= entry.first.length() &&
-            path.compare(path.length() - entry.first.length(), entry.first.length(), entry.first) == 0) // compare file extension
+        if (path.ends_with(entry.first)) // check if path ends with file extension
         {
             return entry.second; // return MIME type
         }
@@ -800,11 +1062,11 @@ std::string Router::readFileContent(const std::string &filePath)
     }
 }
 
-void Router::route(const std::string &path, int client_socket, const std::string &clientIp, Middleware *middleware = nullptr)
+void Router::route(const std::string &path, int client_socket, const std::string &clientIp, Middleware *middleware)
 {
-    std::string filePath = staticFolder + path;                                          // get full file path
-    bool isIndex = (path == "/index.html" || path == "/" || fs::is_directory(filePath)); // check if it's an index request
-    bool isAsset = Http::isAssetRequest(path);                                           // check if it's an asset request
+    std::string filePath = staticFolder + path;
+    bool isIndex = (path == "/index.html" || path == "/" || fs::is_directory(filePath));
+    bool isAsset = Http::isAssetRequest(path);
 
     if (fs::is_directory(filePath))
     {
@@ -832,25 +1094,8 @@ void Router::route(const std::string &path, int client_socket, const std::string
         return;
     }
 
-    std::string content = readFileContent(filePath);
-    if (content.empty())
-    {
-        if (!isAsset)
-        {
-            Logger::getInstance()->error("Failed to read file: " + filePath, clientIp);
-        }
-        const char *response =
-            "HTTP/1.1 500 Internal Server Error\r\n"
-            "Content-Type: text/plain\r\n"
-            "Content-Length: 21\r\n"
-            "\r\n"
-            "Internal Server Error";
-        send(client_socket, response, strlen(response), 0); // send error response
-        return;
-    }
-
     std::string mimeType = getMimeType(filePath);
-    Http::sendResponse(client_socket, content, mimeType, 200, clientIp, !isAsset && isIndex, middleware); // send response
+    Http::sendResponse(client_socket, filePath, mimeType, 200, clientIp, !isAsset && isIndex, middleware);
 }
 
 class Parser
