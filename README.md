@@ -41,10 +41,13 @@ The server is built with a modular architecture, separating concerns into distin
 - 🚀 Thread pool for efficient concurrency
 - 📌 Directory index support (serves index.html by default)
 - 🖥️ Colored terminal output
+- 🛡️ Rate limiting middleware
+- 📝 Robust error handling
+- 📈 Performance optimizations
 
 ## Prerequisites
 
-- C++17 or higher
+- C++20 compiler
 - nlohmann/json library
 - Linux environment (uses epoll)
 
@@ -56,7 +59,7 @@ git clone https://github.com/Pp3ng/pgs.git
 
 # Create build directory
 cd pgs
-g++ -std=c++17 -o pgs pgs.cpp -Wall -lz -pthread -lstdc++fs
+make
 ```
 
 ## Configuration
@@ -150,6 +153,7 @@ The server will:
    - MIME type detection
    - Directory traversal prevention
    - Compression support
+   - Zero-copy file transfer (sendfile())
 
 ### Response Codes
 
