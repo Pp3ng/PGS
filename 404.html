@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>404 - Lost in Space</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Space+Mono&display=swap');
+
+        body,
+        html {
+            height: 100%;
+            margin: 0;
+            font-family: 'Space Mono', monospace;
+            color: #ffffff;
+            overflow: hidden;
+            background: linear-gradient(160deg, #000428, #1c1c3b, #3a3a60, #4b79a1, #6dd5ed);
+
+            background-size: cover;
+        }
+
+
+        .space-background {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(180deg, rgba(0, 0, 0, 0.8) 0%, rgba(0, 0, 0, 0) 60%);
+            z-index: -4;
+        }
+
+        .stars {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: -2;
+            transition: transform 0.1s ease-out;
+        }
+
+        @keyframes twinkle {
+            0%, 100% {
+                opacity: 0.2;
+            }
+            50% {
+                opacity: 1;
+            }
+        }
+
+        .content {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+            z-index: 1;
+        }
+
+        @keyframes horrorShake {
+            0% {
+                transform: translate(0, 0) rotate(0deg);
+            }
+            10% {
+                transform: translate(-2px, -2px) rotate(-1deg);
+            }
+            20% {
+                transform: translate(2px, 2px) rotate(1deg);
+            }
+            30% {
+                transform: translate(-1px, -1px) rotate(-0.5deg);
+            }
+            40% {
+                transform: translate(1px, 1px) rotate(0.5deg);
+            }
+            50% {
+                transform: translate(-2px, 2px) rotate(-1deg);
+            }
+            60% {
+                transform: translate(2px, -2px) rotate(1deg);
+            }
+            70% {
+                transform: translate(-1px, 2px) rotate(-0.5deg);
+            }
+            80% {
+                transform: translate(1px, -1px) rotate(0.5deg);
+            }
+            90% {
+                transform: translate(-2px, -2px) rotate(-1deg);
+            }
+            100% {
+                transform: translate(0, 0) rotate(0deg);
+            }
+        }
+
+        h1 {
+            font-size: 8em;
+            margin: 0;
+            text-shadow: 0 0 10px #00ffff, 0 0 20px #00ffff, 0 0 30px #00ffff;
+            animation: horrorShake 0.5s infinite, glitch 5s infinite;
+            position: relative;
+        }
+
+        @keyframes glitch {
+            0% {
+                text-shadow: 0 0 10px #00ffff, 0 0 20px #00ffff, 0 0 30px #00ffff;
+            }
+            25% {
+                text-shadow: -2px 0 #ff00de, 2px 2px #00ffff;
+            }
+            50% {
+                text-shadow: 2px -2px #ff00de, -2px 2px #00ffff;
+            }
+            75% {
+                text-shadow: -2px 2px #ff00de, 2px -2px #00ffff;
+            }
+            100% {
+                text-shadow: 0 0 10px #00ffff, 0 0 20px #00ffff, 0 0 30px #00ffff;
+            }
+        }
+
+        p {
+            font-size: 1.5em;
+            margin: 20px 0;
+            text-shadow: 0 0 5px #00ffff;
+        }
+
+        a {
+            display: inline-block;
+            color: #ffffff;
+            background: #00ffff;
+            padding: 10px 20px;
+            border-radius: 5px;
+            text-decoration: none;
+            transition: all 0.3s;
+            font-weight: bold;
+            text-shadow: none;
+        }
+
+        a:hover {
+            background: #ffffff;
+            color: #000000;
+            transform: scale(1.1);
+        }
+
+        .astronaut {
+            position: absolute;
+            width: 100px;
+            height: 100px;
+            background: url('https://api.iconify.design/noto-v1:astronaut.svg') no-repeat center center;
+            background-size: contain;
+            animation: float 10s ease-in-out infinite, spin 20s linear infinite;
+            z-index: 1;
+            opacity: 0.7;
+        }
+
+        @keyframes float {
+            0%, 100% {
+                transform: translateY(0) rotate(0deg);
+            }
+            25% {
+                transform: translateY(-15px) rotate(5deg);
+            }
+            50% {
+                transform: translateY(0) rotate(0deg);
+            }
+            75% {
+                transform: translateY(15px) rotate(-5deg);
+            }
+        }
+
+        @keyframes spin {
+            0% {
+                transform: rotate(0deg);
+            }
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+
+        .ufo {
+            position: absolute;
+            width: 150px;
+            height: 80px;
+            background: url('https://api.iconify.design/noto:flying-saucer.svg') no-repeat center center;
+            background-size: contain;
+            cursor: pointer;
+            transition: transform 0.3s;
+            z-index: 1;
+            animation: hover 15s ease-in-out infinite, ufoGlow 2s infinite alternate;
+        }
+
+        @keyframes hover {
+            0%, 100% {
+                transform: translateX(0) translateY(0);
+            }
+            25% {
+                transform: translateX(50px) translateY(-25px);
+            }
+            50% {
+                transform: translateX(100px) translateY(0);
+            }
+            75% {
+                transform: translateX(50px) translateY(25px);
+            }
+        }
+
+        @keyframes ufoGlow {
+            0% {
+                filter: drop-shadow(0 0 5px #00ffff);
+            }
+            100% {
+                filter: drop-shadow(0 0 20px #00ffff);
+            }
+        }
+
+        .ufo:hover {
+            transform: scale(1.1);
+        }
+
+        .message {
+            position: absolute;
+            background: rgba(0, 255, 255, 0.2);
+            border: 2px solid #00ffff;
+            border-radius: 10px;
+            padding: 10px;
+            display: none;
+            color: #00ffff;
+            text-shadow: 0 0 5px #00ffff;
+        }
+
+        .meteor {
+            position: absolute;
+            width: 300px;
+            height: 1px;
+            background: linear-gradient(to right, rgba(0, 255, 255, 0) 0%, rgba(0, 255, 255, 0.4) 50%, rgba(0, 255, 255, 0) 100%);
+            animation: meteor 3s linear infinite;
+            transform: rotate(-45deg);
+            z-index: -1;
+            box-shadow: 0 0 10px #00ffff;
+        }
+
+        @keyframes meteor {
+            0% {
+                transform: translateX(-100%) translateY(-100%) rotate(-45deg);
+                opacity: 1;
+            }
+            70% {
+                opacity: 1;
+            }
+            100% {
+                transform: translateX(100%) translateY(100%) rotate(-45deg);
+                opacity: 0;
+            }
+        }
+
+        .static-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-image: url('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADIAAAAyCAMAAAAp4XiDAAAAUVBMVEWFhYWDg4N3d3dtbW17e3t1dXWBgYGHh4d5eXlzc3OLi4ubm5uVlZWPj4+NjY19fX2JiYl/f39ra2uRkZGZmZlpaWmXl5dvb29xcXGTk5NnZ2c8TV1mAAAAG3RSTlNAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQsInPgAAAN1JREFUSMftkcENwjAMQ1ESxzJb9bNizvn/7z2YIOh0nFgml5AAEQogU3eAh9jozotziFj+owly0giHNSgFPct3LLuG7nywTOASkP82z+1psMbOxsBd9+3XpSP2tTjeugEXz5oAvG6Fg3ZUNvZWEOH+zm7COQJH07RZ1cU8ZrY+EKlkiMeWXG2lpN0SvWWOQb5kiZL5sQlfJWgZpns0GKPzYQ+iyGeEgsp3KE3J1iaC3lxYQJXQAAAAAElFTkSuQmCC');
+            opacity: 0.05;
+            z-index: -1;
+        }
+    </style>
+</head>
+
+<body>
+<div class="space-background"></div>
+<div class="stars" id="stars"></div>
+<div class="content">
+    <h1>404</h1>
+    <p>Oops! Looks like you're lost in space.</p>
+    <p>The page you're looking for has drifted into the void.</p>
+    <a href="/">Return to Earth</a>
+</div>
+<div class="astronaut" style="top: 20%; left: 70%;"></div>
+<div class="astronaut" style="bottom: 20%; right: 70%;"></div>
+<div class="ufo" id="ufo" style="top: 10%; left: 10%;"></div>
+<div class="message" id="message"></div>
+<div class="meteor" style="top: 30%; left: -10%;"></div>
+<div class="meteor" style="top: 70%; right: -10%;"></div>
+<div class="static-overlay"></div>
+<script>
+    function createStars() {
+        const starsContainer = document.getElementById('stars');
+        for (let i = 0; i < 200; i++) {
+            const star = document.createElement('div');
+            star.className = 'star';
+            starsContainer.appendChild(star);
+        }
+    }
+
+    function setupUFO() {
+        const ufo = document.getElementById('ufo');
+        const message = document.getElementById('message');
+        const messages = [
+            "We come in peace!",
+            "Take me to your leader!",
+            "Error 404: Earth not found",
+            "Houston, we have a problem",
+            "One small step for man, one giant leap for 404 pages"
+        ];
+
+        ufo.addEventListener('click', () => {
+            message.textContent = messages[Math.floor(Math.random() * messages.length)];
+            message.style.display = 'block';
+            message.style.left = `${ufo.offsetLeft}px`;
+            message.style.top = `${ufo.offsetTop + ufo.offsetHeight}px`;
+
+            setTimeout(() => {
+                message.style.display = 'none';
+            }, 3000);
+        });
+    }
+
+    function setupParallax() {
+        const stars = document.getElementById('stars');
+        document.addEventListener('mousemove', (e) => {
+            const x = e.clientX / window.innerWidth;
+            const y = e.clientY / window.innerHeight;
+            stars.style.transform = `translate(${x * 30}px, ${y * 30}px)`;
+        });
+    }
+
+    createStars();
+    setupUFO();
+    setupParallax();
+</script>
+</body>
+
+</html>
