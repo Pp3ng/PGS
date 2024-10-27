@@ -16,6 +16,28 @@ The server is built with a modular architecture, separating concerns into distin
 
 ![Benchmarking](diagram/performance.png)
 
+---
+
+## Features
+
+- ✨ Multi-threaded request handling
+- 📁 Static file serving
+- ⚡ Epoll-based I/O multiplexing
+- 🔧 JSON-based configuration
+- 🎯 MIME type detection
+- 📡 A default nice 404 page
+- 🚀 Thread pool for efficient concurrency
+- 📌 Directory index support (serves index.html by default)
+- 🖥️ Colored terminal output
+- 🛡️ Rate limiting middleware
+- 📝 Robust error handling
+- 📈 Performance optimizations
+- 📦 Lightweight and modular design
+- 🛠️ Easy to configure and deploy
+- 📜 Detailed logging and error reporting
+
+---
+
 ### Core Components
 
 1. **Server**: The main orchestrator that initializes and coordinates all components.
@@ -37,24 +59,6 @@ The server is built with a modular architecture, separating concerns into distin
 2. **Parser**: Configuration file parser using nlohmann/json.
 3. **Config**: Structure for storing server configuration.
 4. **TerminalUtils**: Utility for formatting terminal output.
-
-## Features
-
-- ✨ Multi-threaded request handling
-- 📁 Static file serving
-- ⚡ Epoll-based I/O multiplexing
-- 🔧 JSON-based configuration
-- 🎯 MIME type detection
-- 📡 A default nice 404 page
-- 🚀 Thread pool for efficient concurrency
-- 📌 Directory index support (serves index.html by default)
-- 🖥️ Colored terminal output
-- 🛡️ Rate limiting middleware
-- 📝 Robust error handling
-- 📈 Performance optimizations
-- 📦 Lightweight and modular design
-- 🛠️ Easy to configure and deploy
-- 📜 Detailed logging and error reporting
 
 ## Prerequisites
 
