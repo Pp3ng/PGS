@@ -1737,13 +1737,18 @@ void Server::start()
 
     try
     {
+        // pre-allocate events array with optimal size
+        static constexpr size_t MAX_EVENTS = 32;
+        struct epoll_event events[MAX_EVENTS];
+
+        // add server socket to epoll
         epoll.add(socket.getSocketFd(), EPOLLIN);
         Logger::getInstance()->info("Server is ready and waiting for connections...");
 
-        struct epoll_event events[10];
         while (!shouldStop)
         {
-            int nfds = epoll.wait(events, 10, 100); // 100ms timeout for more responsive shutdown
+            // use shorter timeout for better responsiveness
+            int nfds = epoll.wait(events, MAX_EVENTS, 50);
 
             if (nfds == -1)
             {
@@ -1757,20 +1762,29 @@ void Server::start()
             {
                 if (events[i].data.fd == socket.getSocketFd())
                 {
+                    // handle new connection
                     std::string clientIp;
                     int client_socket = socket.acceptConnection(clientIp);
                     if (client_socket < 0)
                         continue;
 
+                    // add connection info under lock
                     {
                         std::lock_guard<std::mutex> lock(connectionsMutex);
                         connections.emplace(
                             client_socket,
-                            ConnectionInfo{std::chrono::steady_clock::now(), clientIp, false, false, 0, 0}); // add connection info
+                            ConnectionInfo{
+                                std::chrono::steady_clock::now(),
+                                clientIp,
+                                false,
+                                false,
+                                0,
+                                0}); // add connection info
                     }
 
                     try
                     {
+                        // add to epoll with edge-triggered mode
                         epoll.add(client_socket, EPOLLIN | EPOLLET);
                     }
                     catch (const std::exception &e)
@@ -1782,15 +1796,26 @@ void Server::start()
                 }
                 else
                 {
-                    pool.enqueue([this, client_socket = events[i].data.fd]()
-                                 {
-                        std::string clientIp;
+                    // handle existing connection
+                    int client_socket = events[i].data.fd;
+                    std::string clientIp;
+
+                    // get client IP under lock
+                    {
+                        std::lock_guard<std::mutex> lock(connectionsMutex);
+                        auto it = connections.find(client_socket);
+                        if (it != connections.end())
                         {
-                            std::lock_guard<std::mutex> lock(connectionsMutex);
-                            auto it = connections.find(client_socket);            // find client socket
-                            if (it != connections.end()) clientIp = it->second.ip;// get client IP
+                            clientIp = it->second.ip;
                         }
-                        handleClient(client_socket, clientIp); }); // handle client in thread pool
+                    }
+
+                    // enqueue client handling task
+                    if (!clientIp.empty())
+                    {
+                        pool.enqueue([this, client_socket, clientIp]
+                                     { handleClient(client_socket, clientIp); });
+                    }
                 }
             }
         }
