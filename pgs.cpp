@@ -10,6 +10,10 @@
 #include <iostream>           // std::cout, std::cerr
 #include <cstring>            // strlen()
 #include <sys/socket.h>       // socket(), bind(), listen(), accept()
+#include <sys/sendfile.h>     // sendfile
+#include <sys/stat.h>         // fstat
+#include <sys/uio.h>          // writev
+#include <sys/mman.h>         // mmap
 #include <arpa/inet.h>        // inet_ntoa
 #include <netinet/tcp.h>      // TCP_KEEPIDLE, TCP_KEEPINTVL, TCP_KEEPCNT
 #include <netinet/in.h>       // sockaddr_in
@@ -17,6 +21,7 @@
 #include <sys/epoll.h>        // Epoll model
 #include <thread>             // std::thread
 #include <vector>             // std::vector
+#include <algorithm>          // std::transform
 #include <queue>              // std::queue
 #include <mutex>              // std::mutex
 #include <condition_variable> // std::condition_variable
@@ -26,22 +31,19 @@
 #include <filesystem>         // Filesystem
 #include <ctime>              // Timestamp
 #include <fcntl.h>            // File control
-#include <nlohmann/json.hpp>  // Parse JSON
 #include <map>                // For storing connection info
 #include <deque>              // For rate limiting
 #include <unordered_map>      // For rate limiting
 #include <unordered_set>      // For asset requests
 #include <chrono>             // For time measurement
 #include <shared_mutex>       // Shared mutex
+#include <memory>             // Shared pointer
+#include <future>             // async tasks
 #include <csignal>            // Signal handling
 #include <atomic>             // Atomic bool flag
 #include <zlib.h>             // zlib compression
-#include <algorithm>          // std::transform
 #include <stdexcept>          // std::runtime_error
-#include <sys/sendfile.h>     // sendfile
-#include <sys/stat.h>         // fstat
-#include <sys/uio.h>          // writev
-#include <sys/mman.h>         // mmap
+#include <nlohmann/json.hpp>  // Parse JSON
 #include "terminal_utils.h"
 
 namespace fs = std::filesystem; // Alias for filesystem namespace
@@ -54,26 +56,26 @@ struct Config
     int threadCount;          // thread count of worker threads
     struct
     {
-        int maxRequests; // Maximum number of requests allowed within the time window
-        int timeWindow;  // Duration of the time window for rate limiting
+        int maxRequests; // maximum number of requests allowed within time window
+        int timeWindow;  // duration of time window for rate limiting
     } rateLimit;
     struct
     {
-        size_t sizeMB;     // Maximum size of the cache in MB
-        int maxAgeSeconds; // Maximum age of cache entries in seconds
+        size_t sizeMB;     // maximum size of cache in MB
+        int maxAgeSeconds; // maximum age of cache entries in seconds
     } cache;
 };
 
 // Connection information structure
 struct ConnectionInfo
 {
-    std::chrono::steady_clock::time_point startTime; // Connection start time
-    std::string ip;                                  // Client IP address
-    bool isLogged;                                   // Flag to track if connection is logged
-    bool isClosureLogged;                            // Flag to track if connection closure is logged
-    uint64_t bytesReceived;                          // Bytes received from client
-    uint64_t bytesSent;                              // Bytes sent to client
-    std::vector<std::string> logBuffer;              // Buffer for storing logs
+    std::chrono::steady_clock::time_point startTime; // connection start time
+    std::string ip;                                  // client IP address
+    bool isLogged;                                   // flag to track if connection is logged
+    bool isClosureLogged;                            // flag to track if connection closure is logged
+    uint64_t bytesReceived;                          // bytes received from client
+    uint64_t bytesSent;                              // bytes sent to client
+    std::vector<std::string> logBuffer;              // buffer for storing logs
 
     ConnectionInfo(const std::chrono::steady_clock::time_point &time,
                    const std::string &ipAddr,
@@ -88,21 +90,21 @@ struct ConnectionInfo
 class Logger
 {
 private:
-    // Basic logger members
-    std::mutex logMutex;   // Mutex to protect log file access
-    std::ofstream logFile; // Log file stream
+    // basic logger members
+    std::mutex logMutex;   // mutex to protect log file access
+    std::ofstream logFile; // log file stream
     static Logger *instance;
-    bool isWaitingForEvents;                                                 // New flag to track event waiting state
-    std::chrono::steady_clock::time_point lastEventWaitLog;                  // Track last event wait log time
-    static constexpr auto EVENT_WAIT_LOG_INTERVAL = std::chrono::seconds(5); // Log interval for waiting events
+    bool isWaitingForEvents;                                                 // new flag to track event waiting state
+    std::chrono::steady_clock::time_point lastEventWaitLog;                  // track last event wait log time
+    static constexpr auto EVENT_WAIT_LOG_INTERVAL = std::chrono::seconds(5); // log interval for waiting events
 
-    // Structure to hold log message data
+    // structure to hold log message data
     struct LogMessage
     {
-        std::string message;                             // The actual log message
-        std::string level;                               // Log level (INFO, ERROR, etc.)
-        std::string ip;                                  // IP address associated with the log
-        std::chrono::system_clock::time_point timestamp; // When the log was created
+        std::string message;                             // actual log message
+        std::string level;                               // log level (INFO, ERROR, etc.)
+        std::string ip;                                  // iP address associated with log
+        std::chrono::system_clock::time_point timestamp; // when log was created
 
         LogMessage(const std::string &msg, const std::string &lvl, const std::string &clientIp)
             : message(msg), level(lvl), ip(clientIp),
@@ -118,10 +120,10 @@ private:
 
     Logger() : isWaitingForEvents(false)
     {
-        logFile.open("pgs.log", std::ios::app); // Open log file in append mode
-        // start the background logging thread
+        logFile.open("pgs.log", std::ios::app); // open log file in append mode
+        // start background logging thread
         loggerThread = std::thread(&Logger::processLogs, this);
-        // note: We deliberately don't call info() here to avoid recursion
+        // deliberately don't call info() here to avoid recursion
         writeLogMessage(LogMessage("Logger initialized", "INFO", "-"));
     }
 
@@ -258,15 +260,15 @@ public:
         }
         else
         {
-            isWaitingForEvents = false; // reset the waiting flag
+            isWaitingForEvents = false; // reset waiting flag
         }
 
-        // queue the log message for async processing
+        // queue log message for async processing
         {
             std::lock_guard<std::mutex> lock(queueMutex);
             messageQueue.emplace(message, level, ip);
         }
-        queueCV.notify_one(); // notify the background thread
+        queueCV.notify_one(); // notify background thread
     }
 
     // convenience methods for different log levels
@@ -291,41 +293,40 @@ public:
     }
 };
 
-Logger *Logger::instance = nullptr; // initialize the static singleton instance
+Logger *Logger::instance = nullptr; // initialize static singleton instance
 
 class Cache
 {
 private:
-    // Structure to hold cache entry data
+    // structure to hold cache entry data
     struct CacheEntry
     {
-        std::vector<char> data;                             // Actual content of the cached file
-        std::string mimeType;                               // MIME type of the cached content
-        time_t lastModified;                                // Last modification time of the file
-        std::chrono::steady_clock::time_point lastAccessed; // Last access time of this cache entry
+        std::vector<char> data;                             // actual content of cached file
+        std::string mimeType;                               // mIME type of cached content
+        time_t lastModified;                                // last modification time of file
+        std::chrono::steady_clock::time_point lastAccessed; // last access time of this cache entry
     };
 
-    std::unordered_map<std::string, CacheEntry> cache; // Main cache storage
-    mutable std::shared_mutex mutex;                   // Mutex for thread-safe operations
-    size_t maxSize;                                    // Maximum size of the cache in bytes
-    size_t currentSize;                                // Current size of the cache in bytes
-    std::chrono::seconds maxAge;                       // Maximum age of cache entries
+    std::unordered_map<std::string, CacheEntry> cache; // main cache storage
+    mutable std::shared_mutex mutex;                   // mutex for thread-safe operations
+    size_t maxSize;                                    // maximum size of cache in bytes
+    size_t currentSize;                                // current size of cache in bytes
+    std::chrono::seconds maxAge;                       // maximum age of cache entries
 
 public:
-    // Constructor
     explicit Cache(size_t maxSizeMB, std::chrono::seconds maxAge)
         : maxSize(static_cast<size_t>(maxSizeMB) * 1024 * 1024),
           currentSize(0),
           maxAge(maxAge)
     {
-        // Check for cache size overflow
-        if (maxSize / (1024 * 1024) != maxSizeMB)
+        // check for cache size overflow
+        if (maxSize / (1024 * 1024) != maxSizeMB) // calculate: 1024*1024=1048576(1MB)
         {
             throw std::overflow_error("Cache size overflow");
         }
     }
 
-    // Retrieve an item from the cache
+    // retrieve an item from cache
     bool get(const std::string &key, std::vector<char> &data, std::string &mimeType, time_t &lastModified)
     {
         std::shared_lock<std::shared_mutex> lock(mutex);
@@ -333,26 +334,26 @@ public:
         if (it != cache.end())
         {
             auto now = std::chrono::steady_clock::now();
-            // Check if the cache entry has expired
+            // check if cache entry has expired
             if (now - it->second.lastAccessed > maxAge)
             {
-                return false; // Cache entry has expired
+                return false; // cache entry has expired
             }
             data = it->second.data;
             mimeType = it->second.mimeType;
             lastModified = it->second.lastModified;
-            it->second.lastAccessed = now; // Update last access time
+            it->second.lastAccessed = now; // update last access time
             return true;
         }
-        return false; // Cache miss
+        return false; // cache miss
     }
 
-    // Add or update an item in the cache
+    // add or update an item in cache
     void set(const std::string &key, const std::vector<char> &data, const std::string &mimeType, time_t lastModified)
     {
         std::unique_lock<std::shared_mutex> lock(mutex);
 
-        // If cache is full, remove oldest entries until there's enough space
+        // if cache is full, remove oldest entries until there's enough space
         while (currentSize + data.size() > maxSize && !cache.empty())
         {
             auto oldest = std::min_element(cache.begin(), cache.end(),
@@ -364,13 +365,13 @@ public:
             cache.erase(oldest);
         }
 
-        // If the new entry is too large, don't cache it
+        // if new entry is too large, don't cache it
         if (data.size() > maxSize)
         {
             return;
         }
 
-        // Add or update the cache entry
+        // add or update cache entry
         auto &entry = cache[key];
         entry.data = data;
         entry.mimeType = mimeType;
@@ -379,7 +380,7 @@ public:
         currentSize += data.size();
     }
 
-    // Clear all items from the cache
+    // clear all items from cache
     void clear()
     {
         std::unique_lock<std::shared_mutex> lock(mutex);
@@ -387,21 +388,21 @@ public:
         currentSize = 0;
     }
 
-    // Get the current size of the cache in bytes
+    // get current size of cache in bytes
     size_t size() const
     {
         std::shared_lock<std::shared_mutex> lock(mutex);
         return currentSize;
     }
 
-    // Get the number of items in the cache
+    // get number of items in cache
     size_t count() const
     {
         std::shared_lock<std::shared_mutex> lock(mutex);
         return cache.size();
     }
 
-    // Get the maximum age of cache entries
+    // get maximum age of cache entries
     std::chrono::seconds getMaxAge() const
     {
         return maxAge;
@@ -414,7 +415,7 @@ public:
         maxAge = newMaxAge;
     }
 
-    // Remove a specific item from the cache
+    // remove a specific item from cache
     bool remove(const std::string &key)
     {
         std::unique_lock<std::shared_mutex> lock(mutex);
@@ -428,7 +429,7 @@ public:
         return false;
     }
 
-    // Check if an item exists in the cache and is not expired
+    // check if an item exists in cache and is not expired
     bool exists(const std::string &key)
     {
         std::shared_lock<std::shared_mutex> lock(mutex);
@@ -467,27 +468,26 @@ public:
 class RateLimiter : public Middleware
 {
 public:
-    // Constructor to initialize the maximum number of requests and the time window
     RateLimiter(size_t maxRequests, std::chrono::seconds timeWindow)
         : maxRequests(maxRequests), timeWindow(timeWindow) {}
 
-    std::string process(const std::string &data) override // override the process method
+    std::string process(const std::string &data) override // override process method
     {
-        std::lock_guard<std::mutex> lock(rateMutex); // lock the mutex to protect the clientRequests map
+        std::lock_guard<std::mutex> lock(rateMutex); // lock mutex to protect clientRequests map
 
-        auto now = std::chrono::steady_clock::now(); // get the current timestamp
+        auto now = std::chrono::steady_clock::now(); // get current timestamp
 
-        auto &timestamps = clientRequests[data]; // retrieve the reference to the list of timestamps
+        auto &timestamps = clientRequests[data]; // retrieve reference to list of timestamps
 
         while (!timestamps.empty() && now - timestamps.front() > timeWindow) // remove expired timestamps
         {
-            timestamps.pop_front(); // Remove the oldest timestamp
+            timestamps.pop_front(); // remove oldest timestamp
         }
 
-        // Check if the number of requests in the time window exceeds the allowed limit
+        // check if number of requests in time window exceeds allowed limit
         if (timestamps.size() >= maxRequests)
         {
-            // If exceeded, return a 429 Too Many Requests response
+            // if exceeded, return a 429 Too Many Requests response
             return "HTTP/1.1 429 Too Many Requests\r\n"
                    "Content-Type: text/plain\r\n"
                    "Content-Length: 19\r\n"
@@ -495,17 +495,17 @@ public:
                    "Too Many Requests";
         }
 
-        timestamps.push_back(now); // add the current timestamp to the list
+        timestamps.push_back(now); // add current timestamp to list
 
-        return data; // return the original data if the rate limit is not exceeded
+        return data; // return original data if rate limit is not exceeded
     }
 
 private:
-    size_t maxRequests;              // Maximum number of requests allowed within the time window
-    std::chrono::seconds timeWindow; // Duration of the time window for rate limiting
-    // Map to store timestamps of requests for each client, identified by their data
+    size_t maxRequests;              // maximum number of requests allowed within time window
+    std::chrono::seconds timeWindow; // duration of time window for rate limiting
+    // map to store timestamps of requests for each client, identified by their data
     std::unordered_map<std::string, std::deque<std::chrono::steady_clock::time_point>> clientRequests;
-    std::mutex rateMutex; // Mutex to protect access to clientRequests
+    std::mutex rateMutex; // mutex to protect access to clientRequests
 };
 
 class Compression : public Middleware
@@ -514,10 +514,10 @@ public:
     [[nodiscard]]
     static bool shouldCompress(const std::string &mimeType, size_t contentLength)
     {
-        // Check if it's an image type
+        // check if it's an image type
         if (mimeType.find("image/") != std::string::npos)
         {
-            return false; // Don't compress images
+            return false; // don't compress images
         }
 
         static const std::vector<std::string> compressibleTypes = {
@@ -530,9 +530,9 @@ public:
         }
 
         return std::any_of(compressibleTypes.begin(), compressibleTypes.end(),
-                           [&mimeType](const std::string &type)
+                           [&mimeType](const std::string &type) // check if the MIME type is compressible
                            {
-                               return mimeType.find(type) != std::string::npos; // Check if the MIME type is compressible
+                               return mimeType.find(type) != std::string::npos;
                            });
     }
 
@@ -559,37 +559,37 @@ private:
     [[nodiscard]]
     std::string compressData(const std::string &data)
     {
-        z_stream zs;                // Create a z_stream object for compression
-        memset(&zs, 0, sizeof(zs)); // Zero-initialize the z_stream structure
+        z_stream zs;                // create a z_stream object for compression
+        memset(&zs, 0, sizeof(zs)); // zero-initialize z_stream structure
 
         // Initialize the zlib compression
-        if (deflateInit2(&zs, Z_DEFAULT_COMPRESSION,  // set the compression level
-                         Z_DEFLATED,                  // use the deflate compression method
+        if (deflateInit2(&zs, Z_DEFAULT_COMPRESSION,  // set compression level
+                         Z_DEFLATED,                  // use deflate compression method
                          15 | 16,                     // 15 | 16 for gzip encoding
-                         8,                           // set the window size
-                         Z_DEFAULT_STRATEGY) != Z_OK) // use the default compression strategy
+                         8,                           // set window size
+                         Z_DEFAULT_STRATEGY) != Z_OK) // use default compression strategy
         {
             throw std::runtime_error("Failed to initialize zlib");
         }
 
-        // Set the input data for compression
+        // set input data for compression
         zs.next_in = reinterpret_cast<Bytef *>(const_cast<char *>(data.data())); // input data
         zs.avail_in = data.size();                                               // size of input data
 
-        int ret;                         // variable to hold the return status of compression
-        const size_t bufferSize = 32768; // define the size of the output buffer (32KB)
-        std::string compressed;          // string to hold the final compressed data
+        int ret;                         // variable to hold return status of compression
+        const size_t bufferSize = 32768; // define size of output buffer (32KB)
+        std::string compressed;          // string to hold final compressed data
         char outbuffer[bufferSize];      // buffer for compressed output
 
-        // compress the data in a loop until all data is processed
+        // compress data in a loop until all data is processed
         do
         {
             zs.next_out = reinterpret_cast<Bytef *>(outbuffer); // output buffer for compressed data
-            zs.avail_out = bufferSize;                          // size of the output buffer
+            zs.avail_out = bufferSize;                          // size of output buffer
 
-            ret = deflate(&zs, Z_FINISH); // perform the compression operation
+            ret = deflate(&zs, Z_FINISH); // perform compression operation
 
-            if (compressed.size() < zs.total_out) // append the compressed data to the output string
+            if (compressed.size() < zs.total_out) // append compressed data to output string
             {
                 compressed.append(outbuffer, zs.total_out - compressed.size());
             }
@@ -598,103 +598,136 @@ private:
         // check if compression completed successfully
         if (ret != Z_STREAM_END)
         {
-            deflateEnd(&zs); // clean up the z_stream object
+            deflateEnd(&zs); // clean up z_stream object
             throw std::runtime_error("Failed to compress data");
         }
 
         deflateEnd(&zs);   // clean up and free resources allocated by zlib
-        return compressed; // return the compressed data
+        return compressed; // return compressed data
     }
 };
 
 class ThreadPool
 {
 public:
-    ThreadPool(size_t numThreads);
-    ~ThreadPool();
-    void enqueue(std::function<void()> task);
-    void stop();
-
-private:
-    std::vector<std::thread> workers;        // worker threads
-    std::queue<std::function<void()>> tasks; // task queue
-    std::mutex queueMutex;                   // mutex to protect task queue
-    std::condition_variable condition;       // condition variable for task queue
-    std::atomic<bool> stop_flag{false};      // flag to stop the worker threads
-
-    void workerThread();
-};
-
-ThreadPool::ThreadPool(size_t numThreads)
-{
-    for (size_t i = 0; i < numThreads; ++i)
+    explicit ThreadPool(size_t numThreads)
     {
-        workers.emplace_back(&ThreadPool::workerThread, this); // create worker threads
-    }
-}
-
-ThreadPool::~ThreadPool()
-{
-    stop();
-}
-
-void ThreadPool::stop()
-{
-    // lock scope
-    {
-        std::unique_lock<std::mutex> lock(queueMutex); // acquire lock to ensure exclusive access to queue and stop_flag
-
-        stop_flag = true; // set stop flag to indicate that the thread pool should stop accepting tasks
-
-        while (!tasks.empty()) // clear all pending tasks to prevent threads from picking up new work
-            tasks.pop();
+        start(numThreads); // initialize thread pool with specified number of threads
     }
 
-    condition.notify_all(); // notify all threads to wake up and check the stop flag
-
-    for (std::thread &worker : workers) // join all worker threads to ensure they have finished executing
+    ~ThreadPool()
     {
-        if (worker.joinable())
-            worker.join();
-    }
-}
-
-void ThreadPool::enqueue(std::function<void()> task)
-{
-    // lock scope
-    {
-        std::unique_lock<std::mutex> lock(queueMutex); // acquire lock to ensure exclusive access to task queue and stop_flag
-
-        if (stop_flag) // if stopping is initiated, ignore new tasks and return immediately
-            return;
-
-        tasks.push(std::move(task)); // move the task into the queue to avoid unnecessary copying
+        stop();
     }
 
-    condition.notify_one(); // notify one thread that a new task is available
-}
+    // delete copy constructor and assignment operator to prevent multiple instances sharing resources
+    ThreadPool(const ThreadPool &) = delete;
+    ThreadPool &operator=(const ThreadPool &) = delete;
 
-void ThreadPool::workerThread()
-{
-    while (true)
+    // template method to enqueue tasks and get future results
+    template <typename F, typename... Args>
+    auto enqueue(F &&f, Args &&...args)
+        -> std::future<typename std::invoke_result_t<F, Args...>>
     {
-        std::function<void()> task;
+        using return_type = typename std::invoke_result_t<F, Args...>;
+
+        // create a packaged task that will store result
+        auto task = std::make_shared<std::packaged_task<return_type()>>(
+            std::bind(std::forward<F>(f), std::forward<Args>(args)...));
+
+        std::future<return_type> res = task->get_future();
+
         {
-            std::unique_lock<std::mutex> lock(queueMutex); // acquire lock to ensure exclusive access to task queue and stop_flag
-            condition.wait(lock, [this]
-                           { return stop_flag || !tasks.empty(); }); // wait until stop flag is set or there are tasks in the queue
-            if (stop_flag && tasks.empty())                          // if stopping is initiated and there are no tasks in the queue, exit the thread
-                return;
-            if (!tasks.empty()) // if there are tasks in the queue, pick up the next task
+            std::unique_lock<std::mutex> lock(queueMutex);
+            if (stop_flag)
             {
-                task = std::move(tasks.front());
-                tasks.pop();
+                throw std::runtime_error("Cannot enqueue on stopped ThreadPool");
+            }
+
+            // wrap packaged task in a void function for queue
+            tasks.emplace([task]()
+                          { (*task)(); });
+        }
+
+        condition.notify_one(); // notify one thread that a task is available
+        return res;
+    }
+
+    // stop thread pool and wait for all tasks to complete
+    void stop()
+    {
+        {
+            std::unique_lock<std::mutex> lock(queueMutex);
+            stop_flag = true;
+        }
+
+        condition.notify_all();
+
+        // join all worker threads
+        for (std::thread &worker : workers)
+        {
+            if (worker.joinable())
+            {
+                worker.join();
             }
         }
-        if (task)
-            task(); // execute the task outside the lock to avoid blocking other threads
+
+        workers.clear();
+
+        // clear any remaining tasks
+        std::queue<std::function<void()>> empty;
+        std::swap(tasks, empty);
     }
-}
+
+    // get number of worker threads
+    size_t threadCount() const
+    {
+        return workers.size();
+    }
+
+private:
+    std::vector<std::thread> workers;
+    std::queue<std::function<void()>> tasks;
+    std::mutex queueMutex;
+    std::condition_variable condition;
+    std::atomic<bool> stop_flag{false};
+
+    // initialize thread pool with specified number of threads
+    void start(size_t numThreads)
+    {
+        workers.reserve(numThreads); // prevent vector reallocation
+
+        for (size_t i = 0; i < numThreads; ++i)
+        {
+            workers.emplace_back([this]
+                                 {
+                while (true) {
+                    std::function<void()> task;// define a task to execute
+                    
+                    {
+                        std::unique_lock<std::mutex> lock(queueMutex);
+                        
+                        condition.wait(lock, [this] {
+                            return stop_flag || !tasks.empty();// wait for a task or stop flag
+                        });
+                        
+                        if (stop_flag && tasks.empty()) {// check if thread pool is stopped
+                            return;
+                        }
+                        
+                        if (!tasks.empty()) {
+                            task = std::move(tasks.front());// get next task
+                            tasks.pop();
+                        }
+                    }
+                    
+                    if (task) {
+                        task();
+                    }
+                } });
+        }
+    }
+};
 
 class Socket
 {
@@ -762,7 +795,7 @@ void Socket::bind()
     address.sin6_addr = in6addr_any; // Bind to all available interfaces
     address.sin6_port = htons(port); // Set port
 
-    if (::bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) // Bind the socket to the address and port
+    if (::bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) // Bind socket to address and port
     {
         std::string errorMsg = "Bind failed: " + std::string(strerror(errno));
         Logger::getInstance()->error(errorMsg);
@@ -779,7 +812,7 @@ void Socket::listen()
 }
 void Socket::closeSocket()
 {
-    if (server_fd != -1) // Check if the socket is valid
+    if (server_fd != -1) // Check if socket is valid
     {
         close(server_fd);
         server_fd = -1;
@@ -852,7 +885,7 @@ public:
             "/assets/", "/static/", "/images/", "/img/",
             "/css/", "/js/", "/fonts/", "/media/"};
 
-        // Check if the path ends with an asset extension
+        // Check if path ends with an asset extension
         for (const auto &ext : assetExtensions)
         {
             if (path.length() >= ext.length() &&
@@ -862,10 +895,10 @@ public:
             }
         }
 
-        // Check if the path contains an asset directory
+        // Check if path contains an asset directory
         for (const auto &dir : assetDirs)
         {
-            if (path.find(dir) != std::string::npos) // check if the path contains an asset directory
+            if (path.find(dir) != std::string::npos) // check if path contains an asset directory
             {
                 return true;
             }
@@ -880,7 +913,7 @@ std::string Http::getRequestPath(const std::string &request)
 {
     size_t pos1 = request.find("GET ");
     size_t pos2 = request.find(" HTTP/");
-    if (pos1 == std::string::npos || pos2 == std::string::npos) // Check if the request is valid
+    if (pos1 == std::string::npos || pos2 == std::string::npos) // Check if  request is valid
     {
         return "/";
     }
@@ -968,7 +1001,7 @@ void Http::sendResponse(int client_socket, const std::string &filePath,
             return;
         }
 
-        // advise the kernel about access pattern for optimal I/O performance
+        // advise kernel about access pattern for optimal I/O performance
         posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
 
         struct stat file_stat;
@@ -1359,7 +1392,7 @@ std::string Router::getMimeType(const std::string &path) // calculate MIME type 
 
     std::string lowerPath = path;
     std::transform(lowerPath.begin(), lowerPath.end(), lowerPath.begin(), ::tolower); // convert path to lowercase
-    // Use ends_with to find the appropriate MIME type
+    // Use ends_with to find appropriate MIME type
     for (const auto &entry : mimeTypes)
     {
         if (lowerPath.ends_with(entry.first)) // check if path ends with file extension
@@ -1420,7 +1453,7 @@ void Router::route(const std::string &path, int client_socket, const std::string
             "Content-Type: text/html\r\n"
             "Content-Length: " +
             std::to_string(content.size()) + "\r\n"
-                                             "Connection: close\r\n" // Close the connection after sending the response
+                                             "Connection: close\r\n" // close connection after sending response
                                              "\r\n" +
             content;
 
@@ -1441,10 +1474,10 @@ public:
 
 Config Parser::parseConfig(const std::string &configFilePath)
 {
-    // Log the start of configuration reading process
+    // log start of configuration reading process
     Logger::getInstance()->info("Reading configuration from: " + configFilePath);
 
-    // Open the configuration file
+    // open  configuration file
     std::ifstream file(configFilePath);
     if (!file.is_open())
     {
@@ -1452,7 +1485,7 @@ Config Parser::parseConfig(const std::string &configFilePath)
         throw std::runtime_error("Could not open config file!");
     }
 
-    // Parse the JSON configuration
+    // parse JSON configuration
     json configJson;
     try
     {
@@ -1464,8 +1497,7 @@ Config Parser::parseConfig(const std::string &configFilePath)
         throw std::runtime_error("Failed to parse configuration file");
     }
 
-    // Check if all required fields exist and are not null
-    // This includes the new rate_limit fields and cache fields
+    // check if all required fields exist and are not null
     if (!configJson.contains("port") || configJson["port"].is_null() ||
         !configJson.contains("static_folder") || configJson["static_folder"].is_null() ||
         !configJson.contains("thread_count") || configJson["thread_count"].is_null() ||
@@ -1480,7 +1512,7 @@ Config Parser::parseConfig(const std::string &configFilePath)
         throw std::runtime_error("Incomplete configuration file");
     }
 
-    // Create a Config object and populate it with values from the JSON
+    // create a Config object and populate it with values from JSON
     Config config;
     config.port = configJson["port"];
     config.staticFolder = configJson["static_folder"];
@@ -1490,144 +1522,171 @@ Config Parser::parseConfig(const std::string &configFilePath)
     config.cache.sizeMB = configJson["cache"]["size_mb"].get<size_t>();
     config.cache.maxAgeSeconds = configJson["cache"]["max_age_seconds"].get<int>();
 
-    // Validate the port number
+    // validate port number
     if (config.port <= 0 || config.port > 65535)
     {
         Logger::getInstance()->error("Invalid port number: " + std::to_string(config.port));
         throw std::runtime_error("Invalid port number");
     }
 
-    // Check if the specified static folder exists
+    // validate static folder path
     if (!fs::exists(config.staticFolder))
     {
         Logger::getInstance()->error("Static folder does not exist: " + config.staticFolder);
         throw std::runtime_error("Invalid static folder path");
     }
 
-    // Validate the thread count
+    // validate thread count
     if (config.threadCount <= 0 || config.threadCount > 1000)
     {
         Logger::getInstance()->error("Invalid thread count: " + std::to_string(config.threadCount));
         throw std::runtime_error("Invalid thread count");
     }
 
-    // Validate the maximum requests for rate limiting
+    // validate maximum requests for rate limiting
     if (config.rateLimit.maxRequests <= 0)
     {
         Logger::getInstance()->error("Invalid max requests for rate limiting: " + std::to_string(config.rateLimit.maxRequests));
         throw std::runtime_error("Invalid max requests for rate limiting");
     }
 
-    // Validate the time window for rate limiting
+    // validate time window for rate limiting
     if (config.rateLimit.timeWindow <= 0)
     {
         Logger::getInstance()->error("Invalid time window for rate limiting: " + std::to_string(config.rateLimit.timeWindow));
         throw std::runtime_error("Invalid time window for rate limiting");
     }
 
-    // Validate cache size
+    // validate cache size
     if (config.cache.sizeMB <= 0 || config.cache.sizeMB > std::numeric_limits<size_t>::max() / (1024 * 1024))
     {
         Logger::getInstance()->error("Invalid cache size: " + std::to_string(config.cache.sizeMB) + " MB");
         throw std::runtime_error("Invalid cache size");
     }
 
-    // Validate cache max age
+    // validate cache max age
     if (config.cache.maxAgeSeconds <= 0)
     {
         Logger::getInstance()->error("Invalid cache max age: " + std::to_string(config.cache.maxAgeSeconds) + " seconds");
         throw std::runtime_error("Invalid cache max age");
     }
 
-    // Log successful configuration loading
+    // log successful configuration loading
     Logger::getInstance()->success("Configuration loaded successfully");
 
-    // Return the populated and validated Config object
+    // return populated and validated Config object
     return config;
 }
 
 class EpollWrapper
 {
 public:
-    EpollWrapper() : epoll_fd(epoll_create1(0))
+    // constructor with minimal but essential error handling
+    inline EpollWrapper() : epoll_fd(epoll_create1(EPOLL_CLOEXEC))
     {
         if (epoll_fd == -1)
         {
-            throw std::runtime_error("Failed to create epoll instance: " + std::string(strerror(errno)));
+            throw std::system_error(errno, std::system_category(), "epoll_create1 failed");
         }
     }
 
-    ~EpollWrapper()
+    inline ~EpollWrapper() noexcept
     {
         if (epoll_fd != -1)
-        {
             close(epoll_fd);
-        }
     }
 
-    // forbid copy
+    // delete copy operations
     EpollWrapper(const EpollWrapper &) = delete;
     EpollWrapper &operator=(const EpollWrapper &) = delete;
 
-    // allow move
-    EpollWrapper(EpollWrapper &&other) noexcept : epoll_fd(other.epoll_fd)
+    /*
+    decide to use inline functions for performance
+    but who knows, the compiler might ignore it
+    */
+
+    // optimized move operations
+    inline EpollWrapper(EpollWrapper &&other) noexcept : epoll_fd(other.epoll_fd)
     {
         other.epoll_fd = -1;
     }
 
-    EpollWrapper &operator=(EpollWrapper &&other) noexcept
+    inline EpollWrapper &operator=(EpollWrapper &&other) noexcept // move assignment operator
     {
         if (this != &other)
         {
             if (epoll_fd != -1)
-            {
                 close(epoll_fd);
-            }
-            epoll_fd = other.epoll_fd;
-            other.epoll_fd = -1;
+            epoll_fd = std::exchange(other.epoll_fd, -1);
         }
         return *this;
     }
 
-    int get() const { return epoll_fd; }
+    [[nodiscard]] inline int get() const noexcept // get epoll file descriptor
+    {
+        return epoll_fd;
+    }
 
-    int wait(struct epoll_event *events, int maxEvents, int timeout)
+    [[nodiscard]] inline int wait(struct epoll_event *events, int maxEvents, int timeout) noexcept
     {
         return epoll_wait(epoll_fd, events, maxEvents, timeout);
     }
 
-    void add(int fd, uint32_t events)
+    inline bool add(int fd, uint32_t events) noexcept // add fd to epoll set with optimized error handling
     {
-        struct epoll_event ev = {};
+
+        struct epoll_event ev;
         ev.events = events;
         ev.data.fd = fd;
-        if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &ev) == -1)
-        {
-            throw std::runtime_error("Failed to add fd to epoll: " + std::string(strerror(errno)));
-        }
+        return epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &ev) == 0;
     }
 
-    void modify(int fd, uint32_t events)
+    inline bool modify(int fd, uint32_t events) noexcept // modify fd in epoll set with optimized error handling
     {
-        struct epoll_event ev = {};
+        struct epoll_event ev;
         ev.events = events;
         ev.data.fd = fd;
-        if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) == -1) // modify fd in epoll
-        {
-            throw std::runtime_error("Failed to modify fd in epoll: " + std::string(strerror(errno)));
-        }
+        return epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) == 0;
     }
 
-    void remove(int fd)
+    inline bool remove(int fd) noexcept // remove fd from epoll set with optimized error handling
     {
-        if (epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, nullptr) == -1) // remove fd from epoll
+
+        return epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, nullptr) == 0;
+    }
+
+    template <typename Iterator>
+    inline size_t batch_operation(Iterator begin, Iterator end,
+                                  int op, uint32_t events = 0) noexcept
+    {
+        size_t success_count = 0;
+        struct epoll_event ev;
+        ev.events = events;
+
+        for (Iterator it = begin; it != end; ++it)
         {
-            throw std::runtime_error("Failed to remove fd from epoll: " + std::string(strerror(errno)));
+            const int fd = *it; // get file descriptor
+            ev.data.fd = fd;
+            if (epoll_ctl(epoll_fd, op, fd, (op == EPOLL_CTL_DEL) ? nullptr : &ev) == 0)
+            {
+                ++success_count;
+            }
         }
+        return success_count;
+    }
+
+    [[nodiscard]] inline bool is_monitored(int fd) const noexcept // check if fd is monitored by epoll
+    {
+        struct epoll_event ev;
+        return epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) != -1 || errno != ENOENT;
     }
 
 private:
     int epoll_fd; // epoll file descriptor
+
+    // Static assertions for compile-time checks
+    static_assert(sizeof(int) >= sizeof(void *) || sizeof(int64_t) >= sizeof(void *), // check if int or int64_t can store a pointer
+                  "Platform must support storing pointers in epoll_data");
 };
 
 class Server
@@ -1646,7 +1705,7 @@ private:
     Cache cache;                               // server cache
     std::mutex connectionsMutex;               // mutex to protect connections map
     std::map<int, ConnectionInfo> connections; // map to store connection info
-    std::atomic<bool> shouldStop{false};       // atomic flag to stop the server
+    std::atomic<bool> shouldStop{false};       // atomic flag to stop server
 
     void handleClient(int client_socket, const std::string &clientIp);
     void closeConnection(int client_socket);
@@ -1773,25 +1832,25 @@ void Server::stop()
 
 void Server::handleClient(int client_socket, const std::string &clientIp)
 {
-    std::vector<char> buffer(1024); // Initialize buffer for reading client data
-    ssize_t valread;                // Variable to store the number of bytes read
-    std::string request;            // String to accumulate the complete client request
-    bool connectionClosed = false;  // Flag to track if the connection has been closed
+    std::vector<char> buffer(1024); // initialize buffer for reading client data
+    ssize_t valread;                // variable to store number of bytes read
+    std::string request;            // string to accumulate complete client request
+    bool connectionClosed = false;  // flag to track if connection has been closed
 
-    // Read data from the client in a loop
+    // read data from client in a loop
     while ((valread = read(client_socket, buffer.data(), buffer.size())) > 0)
     {
-        // Check if the server should stop processing
+        // check if server should stop and while reading data
         if (shouldStop)
         {
             closeConnection(client_socket);
             return;
         }
 
-        // Append the read data to the request string
+        // append read data to request string
         request.append(buffer.data(), valread);
 
-        // Update the bytes received for this connection
+        // update bytes received for this connection
         std::lock_guard<std::mutex> lock(connectionsMutex);
         auto it = connections.find(client_socket);
         if (it != connections.end())
@@ -1800,47 +1859,47 @@ void Server::handleClient(int client_socket, const std::string &clientIp)
         }
     }
 
-    // Check if the connection has been closed by the client
+    // check if connection has been closed by client
     if (valread == 0 || (valread < 0 && errno != EAGAIN && errno != EWOULDBLOCK))
     {
         closeConnection(client_socket);
         connectionClosed = true;
     }
 
-    // Process the request if the connection is still open and we have received data
+    // process request if connection is still open and we have received data
     if (!connectionClosed && !request.empty())
     {
-        std::string path = Http::getRequestPath(request); // Extract the request path
-        bool isAsset = Http::isAssetRequest(path);        // Check if it's an asset request
+        std::string path = Http::getRequestPath(request); // extract request path
+        bool isAsset = Http::isAssetRequest(path);        // check if it's an asset request
 
-        // Log non-asset requests
+        // log non-asset requests
         if (!isAsset)
         {
             logRequest(client_socket, "Processing request: " + path);
         }
 
-        // Apply rate limiting to the request
+        // apply rate limiting to request
         std::string processedRequest = rateLimiter.process(request);
 
-        // Check if the request was rate limited
+        // check if request was rate limited
         if (processedRequest == "HTTP/1.1 429 Too Many Requests\r\n"
                                 "Content-Type: text/plain\r\n"
                                 "Content-Length: 19\r\n"
                                 "\r\n"
                                 "Too Many Requests")
         {
-            // Send the rate limit response to the client
+            // send rate limit response to client
             send(client_socket, processedRequest.c_str(), processedRequest.size(), 0);
         }
         else
         {
-            // Create a compression middleware instance
+            // create a compression middleware instance
             Compression compressionMiddleware;
-            // Route the request with compression middleware
+            // route request with compression middleware
             router.route(path, client_socket, clientIp, &compressionMiddleware, &cache);
         }
 
-        // Log completion of non-asset requests
+        // log completion of non-asset requests
         if (!isAsset)
         {
             logRequest(client_socket, "Request completed: " + path);
@@ -1868,7 +1927,7 @@ void Server::closeConnection(int client_socket)
                 "Connection closed - Duration: " + durationStr +
                     ", Bytes received: " + std::to_string(it->second.bytesReceived) +
                     ", Bytes sent: " + std::to_string(it->second.bytesSent),
-                it->second.ip); // always log the connection closure
+                it->second.ip); // always log connection closure
 
             it->second.isClosureLogged = true;
         }
@@ -1897,11 +1956,11 @@ void Server::logRequest(int client_socket, const std::string &message)
 
 std::unique_ptr<Server> server; // instance of Server
 
-std::atomic<bool> running(true); // flag to control the main loop
+std::atomic<bool> running(true); // flag to control main loop
 
 void signalHandler(int signum)
 {
-    running = false; // Set the running flag to false
+    running = false; // set running flag to false
 }
 
 int main(void)
@@ -1952,8 +2011,8 @@ int main(void)
     }
 
     Logger::getInstance()->info("Server shut down successfully");
-    server.reset();            // explicitly destroy the server object
-    Logger::destroyInstance(); // destroy the logger instance
+    server.reset();            // explicitly destroy server object
+    Logger::destroyInstance(); // destroy logger instance
 
     return EXIT_SUCCESS;
 }
