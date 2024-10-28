@@ -17,7 +17,6 @@ skinparam {
 
 title PGS Architecture Class Diagram
 
-' Left: Configuration and Data Structures
 package "Configuration" {
     class Config <<Config>> {
         + port: int
@@ -26,10 +25,7 @@ package "Configuration" {
         + rateLimit: RateLimitConfig
         + cache: CacheConfig
     }
-    note right of Config
-        Plain configuration structure
-        Initialized from pgs_conf.json
-    end note
+    note right of Config: Plain configuration structure\nInitialized from pgs_conf.json
 
     class RateLimitConfig <<Config>> {
         + maxRequests: int
@@ -51,15 +47,27 @@ package "Data Structures" {
         + bytesReceived: uint64_t
         + bytesSent: uint64_t
         + logBuffer: vector<string>
-        + ConnectionInfo(time, ipAddr, logged, closureLogged, received, sent)
+        + ConnectionInfo(time: chrono::steady_clock::time_point, ipAddr: string,\n logged: bool = false, closureLogged: bool = false,\n received: uint64_t = 0, sent: uint64_t = 0)
     }
-    note bottom of ConnectionInfo
-        Tracks individual client connection metrics
-        and maintains connection-specific log buffers
-    end note
+    note bottom of ConnectionInfo: Tracks individual client connection metrics\nand maintains connection-specific log buffers
+
+    class CacheEntry <<Structure>> {
+        + data: vector<char>
+        + mimeType: string
+        + lastModified: time_t
+        + lruIterator: list<string>::iterator
+        + CacheEntry()
+        + CacheEntry(const vector<char>&, const string&, time_t, list<string>::iterator)
+    }
+
+    class CacheStats <<Structure>> {
+        + currentSize: size_t
+        + maxSize: size_t
+        + itemCount: size_t
+        + maxAge: chrono::seconds
+    }
 }
 
-' Center: Core Components
 package "Core Components" {
     class Server <<Core>> {
         - socket: Socket
@@ -71,126 +79,164 @@ package "Core Components" {
         - epoll: EpollWrapper
         - rateLimiter: RateLimiter
         - cache: Cache
-        + Server(int port, const string& staticFolder, int threadCount,
-                int maxRequests, int timeWindow, int cacheSizeMB, int maxAgeSeconds)
+        + Server(int port, const string& staticFolder, int threadCount,\n int maxRequests, int timeWindow, int cacheSizeMB, int maxAgeSeconds)
         + start(): void
         + stop(): void
         - handleClient(int client_socket, const string& clientIp): void
         - closeConnection(int client_socket): void
         - logRequest(int client_socket, const string& message): void
     }
-    note top of Server
-        Central server component that orchestrates
-        all other components and manages the
-        lifecycle of client connections
-    end note
+    note top of Server: Central server component that orchestrates\nall other components and manages the\nlifecycle of client connections
 
-    together {
-        class Socket <<Core>> {
-            - server_fd: int
-            - port: int
-            + Socket(int port)
-            + bind(): void
-            + listen(): void
-            + getSocketFd() const: int
-        }
-
-        class Router <<Core>> {
-            - staticFolder: string
-            + Router(const string& staticFolder)
-            + route(const string& path, int client_socket,
-                   const string& clientIp, Middleware* middleware, Cache* cache): void
-            - getMimeType(const string& path): string
-            - readFileContent(const string& filePath): string
-        }
+    class Socket <<Core>> {
+        - server_fd: int
+        - port: int
+        + Socket(int port)
+        + bind(): void
+        + listen(): void
+        + closeSocket(): void
+        + acceptConnection(string& clientIp): int
+        + getSocketFd() const: int
+        + {static} durationToString(const chrono::steady_clock::duration& duration): string
     }
 
-    together {
-        class ThreadPool <<Core>> {
-            - workers: vector<thread>
-            - tasks: queue<function<void()>>
-            - queueMutex: mutex
-            - condition: condition_variable
-            - stop_flag: atomic<bool>
-            + ThreadPool(size_t numThreads)
-            + enqueue(function<void()> task): void
-        }
+    class Router <<Core>> {
+        - staticFolder: string
+        + Router(const string& staticFolder)
+        + route(const string& path, int client_socket,\n const string& clientIp, Middleware* middleware, Cache* cache): void
+        + getStaticFolder() const: string
+        - getMimeType(const string& path): string
+    }
 
-        class Logger <<Core>> {
-            - {static} instance: Logger*
-            - logFile: ofstream
-            - logMutex: mutex
-            + {static} getInstance(): Logger*
-            + log(const string& message, const string& level, const string& ip): void
-            + error(const string& message, const string& ip): void
-            + info(const string& message, const string& ip): void
-        }
+    class ThreadPool <<Core>> {
+        - workers: vector<thread>
+        - tasks: queue<function<void()>>
+        - queueMutex: mutex
+        - condition: condition_variable
+        - stop_flag: atomic<bool>
+        + ThreadPool(size_t numThreads)
+        + template<typename F, typename... Args>\n enqueue(F&& f, Args&&... args): future<invoke_result_t<F, Args...>>
+        + stop(): void
+        + threadCount() const: size_t
+        - start(size_t numThreads): void
+    }
 
-        class Cache <<Core>> {
-            - cache: unordered_map<string, CacheEntry>
-            - mutex: shared_mutex
-            - maxSize: size_t
-            - currentSize: size_t
-            + Cache(size_t maxSizeMB, chrono::seconds maxAge)
-            + get(const string& key, vector<char>& data,
-                 string& mimeType, time_t& lastModified): bool
-            + set(const string& key, const vector<char>& data,
-                 const string& mimeType, time_t lastModified): void
-        }
+    class Http <<Core>> {
+        - {static} BUFFER_SIZE: size_t
+        - {static} ALIGNMENT: size_t
+        - {static} SENDFILE_CHUNK: size_t
+        - {static} MAX_IOV: int
+        + {static} getRequestPath(const string& request): string
+        + {static} sendResponse(int client_socket, const string& filePath,\n const string& mimeType, int statusCode,\n const string& clientIp, bool isIndex,\n Middleware* middleware, Cache* cache): void
+        + {static} isAssetRequest(const string& path): bool
+        - {static} setupSocketOptions(int client_socket, int cork, const string& clientIp): bool
+        - {static} handleFileContent(FileGuard&, const string&, vector<char>&,\n size_t&, time_t&, const string&): bool
+        - {static} compressContent(Middleware*, const string&, size_t,\n vector<char>&, string&, bool, FileGuard&,\n pmr::monotonic_buffer_resource&): bool
+        - {static} generateHeaders(int, const string&, size_t, time_t, bool): string
+        - {static} sendWithWritev(int, const string&, const string&,\n const vector<char>&, bool, bool, const string&): size_t
+        - {static} sendLargeFile(int, FileGuard&, size_t, const string&): size_t
+        - {static} updateCache(Cache*, const string&, const string&,\n time_t, FileGuard&, size_t,\n pmr::monotonic_buffer_resource&): void
+    }
+
+    class Logger <<Core>> {
+        - {static} instance: Logger*
+        - logFile: ofstream
+        - logMutex: mutex
+        - messageQueue: queue<LogMessage>
+        - queueMutex: mutex
+        - queueCV: condition_variable
+        - loggerThread: thread
+        - running: atomic<bool>
+        - isWaitingForEvents: bool
+        - lastEventWaitLog: chrono::steady_clock::time_point
+        + {static} getInstance(): Logger*
+        + {static} destroyInstance(): void
+        + log(const string& message, const string& level, const string& ip): void
+        + error(const string& message, const string& ip = "-"): void
+        + info(const string& message, const string& ip = "-"): void
+        + warning(const string& message, const string& ip = "-"): void
+        + success(const string& message, const string& ip = "-"): void
+        - Logger()
+        - processLogs(): void
+        - writeLogMessage(const LogMessage& msg): void
+    }
+
+    class EpollWrapper <<Core>> {
+        - epoll_fd: int
+        + EpollWrapper()
+        + get() const: int
+        + wait(epoll_event* events, int maxEvents, int timeout): int
+        + add(int fd, uint32_t events): bool
+        + modify(int fd, uint32_t events): bool
+        + remove(int fd): bool
+        + template<typename Iterator>\n batch_operation(Iterator begin, Iterator end,\n int op, uint32_t events = 0): size_t
+        + is_monitored(int fd) const: bool
     }
 }
 
-' Right: Utility Classes
 package "Utility Classes" {
-    together {
-        abstract class Middleware <<Utility>> {
-            + process(const string& data): string
-        }
-
-        class RateLimiter <<Utility>> {
-            - maxRequests: size_t
-            - timeWindow: chrono::seconds
-            - clientRequests: unordered_map<string, deque<time_point>>
-            + RateLimiter(size_t maxRequests, chrono::seconds timeWindow)
-            + process(const string& data): string
-        }
-
-        class Compression <<Utility>> {
-            + {static} shouldCompress(const string& mimeType, size_t contentLength): bool
-            + {static} clientAcceptsGzip(const string& request): bool
-            + process(const string& data): string
-        }
+    abstract class Middleware <<Utility>> {
+        + {abstract} process(const string& data): string
+        + virtual ~Middleware() = default
     }
 
-    together {
-        class Http <<Utility>> {
-            + {static} getRequestPath(const string& request): string
-            + {static} sendResponse(int client_socket, const string& filePath,
-                                  const string& mimeType, int statusCode,
-                                  const string& clientIp, bool isIndex,
-                                  Middleware* middleware, Cache* cache): void
-        }
+    class Cache <<Utility>> {
+        - cache: unordered_map<string, CacheEntry>
+        - lruList: list<string>
+        - mutex: shared_mutex
+        - maxSize: size_t
+        - currentSize: size_t
+        - maxAge: chrono::seconds
+        + Cache(size_t maxSizeMB, chrono::seconds maxAge)
+        + template<typename Vector> get(const string& key, Vector& data,\n string& mimeType, time_t& lastModified): bool
+        + template<typename Vector> set(const string& key, const Vector& data,\n const string& mimeType, time_t lastModified): void
+        + clear(): void
+        + remove(const string& key): bool
+        + exists(const string& key): bool
+        + size() const: size_t
+        + count() const: size_t
+        + getMaxAge() const: chrono::seconds
+        + setMaxAge(chrono::seconds newMaxAge): void
+        + getStats() const: CacheStats
+        - updateLRU(const string& key): void
+    }
 
-        class Parser <<Utility>> {
-            + {static} parseConfig(const string& configFilePath): Config
-        }
+    class RateLimiter <<Utility>> {
+        - maxRequests: size_t
+        - timeWindow: chrono::seconds
+        - clientRequests: unordered_map<string, deque<chrono::steady_clock::time_point>>
+        - rateMutex: mutex
+        + RateLimiter(size_t maxRequests, chrono::seconds timeWindow)
+        + process(const string& data) override: string
+    }
+
+    class Compression <<Utility>> {
+        + {static} shouldCompress(const string& mimeType, size_t contentLength): bool
+        + {static} clientAcceptsGzip(const string& request): bool
+        + process(const string& data) override: string
+        - compressData(const string& data): string
+    }
+
+    class Parser <<Utility>> {
+        + {static} parseConfig(const string& configFilePath): Config
     }
 }
 
-' Core Dependencies
 Server "1" *-- "1" Socket : manages >
 Server "1" *-- "1" Router : uses >
 Server "1" *-- "1" ThreadPool : delegates tasks to >
 Server "1" o-- "0..*" ConnectionInfo : tracks >
 Server "1" *-- "1" Cache : uses >
 Server "1" *-- "1" RateLimiter : uses >
+Server "1" *-- "1" EpollWrapper : uses >
 
-' Configuration Dependencies
-Server ..> Config : configured by >
 Config "1" *-- "1" RateLimitConfig
 Config "1" *-- "1" CacheConfig
 
-' Utility Dependencies
+Cache "1" o-- "0..*" CacheEntry : contains >
+Cache ..> CacheStats : produces >
+
+Server ..> Config : configured by >
 Server ..> Http : uses >
 Parser ..> Config : creates >
 Server ..> Logger : logs through >
@@ -199,21 +245,19 @@ Router ..> Http : uses >
 Router ..> Middleware : uses >
 Router ..> Cache : uses >
 
-' Inheritance Relationships
-RateLimiter --|> Middleware
-Compression --|> Middleware
+RateLimiter -up-|> Middleware : implements >
+Compression -up-|> Middleware : implements >
 
-' Layout Hints
 Config -[hidden]down-> ConnectionInfo
 Socket -[hidden]right-> Router
 Http -[hidden]right-> Parser
 
-legend bottom
-    |= Color |= Component Type |= Purpose |
-    |<#LightGreen>| Configuration |Configuration structures|
-    |<#LightBlue>| Core Components |Server functionality|
-    |<#LightGray>| Utility Classes |Helper functions|
-    |<#LightYellow>| Data Structures |Data management|
+legend right
+  |= Color |= Component Type |= Purpose |
+  |<#LightGreen>| Configuration |Configuration structures|
+  |<#LightBlue>| Core Components |Server functionality|
+  |<#LightGray>| Utility Classes |Helper functions|
+  |<#LightYellow>| Data Structures |Data management|
 endlegend
 
 @enduml

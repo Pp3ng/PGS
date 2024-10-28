@@ -1,89 +1,80 @@
 @startuml server-usecase
 
-' Layout direction
 left to right direction
 
-' Actor definitions
-:Client 1: as Client1 #aliceblue
-:Client 2: as Client2 #aliceblue
-:Client 3: as Client3 #aliceblue
-:Administrator: as Admin #lightgreen
+' Actor definitions with clear roles
+:HTTP Client: as Client1 #aliceblue
+:Static Asset Client: as Client2 #aliceblue
+:API Client: as Client3 #aliceblue
+:System Administrator: as Admin #lightgreen
 
-' System boundary
-rectangle "PGS Server System" {
-    ' Server Initialization
+rectangle "PGS High-Performance Server System" {
     package "Server Initialization" {
-        usecase "Initialize Server" as UC1
-        usecase "Parse Configuration" as UC2
-        usecase "Set Socket Options" as UC22
-        usecase "Create Dual-Stack Socket" as UC23
-        usecase "Set Non-Blocking Mode" as UC24
-        usecase "Initialize Cache" as UC29
+        usecase "Initialize Server Components" as UC1
+        usecase "Parse JSON Configuration" as UC2
+        usecase "Configure TCP Socket Options" as UC22
+        usecase "Create IPv4/IPv6 Dual-Stack Socket" as UC23
+        usecase "Enable Non-Blocking IO Mode" as UC24
+        usecase "Initialize LRU Cache System" as UC29
     }
 
-    ' Server Operation
-    package "Server Operation" {
-        usecase "Start Server" as UC3
-        usecase "Accept New Connection" as UC4
-        usecase "Manage Thread Pool" as UC12
-        usecase "Manage Epoll Events" as UC13
+    package "Core Server Operations" {
+        usecase "Start Server Instance" as UC3
+        usecase "Accept Client Connection" as UC4
+        usecase "Manage Thread Pool Workers" as UC12
+        usecase "Handle Epoll Events" as UC13
     }
 
-    ' Request Handling
-    package "Request Processing" {
-        usecase "Handle HTTP Request" as UC5
-        usecase "Route Request" as UC6
-        usecase "Handle Asset Request" as UC18
-        usecase "Handle Non-Asset Request" as UC19
-        usecase "Rate Limit Requests" as UC27
-        usecase "Compress Responses" as UC28
-        usecase "Check Cache" as UC30
-        usecase "Update Cache" as UC31
+    package "Request Processing Pipeline" {
+        usecase "Process HTTP Request" as UC5
+        usecase "Route Request to Handler" as UC6
+        usecase "Process Static Asset Request" as UC18
+        usecase "Process Dynamic Request" as UC19
+        usecase "Apply Rate Limiting" as UC27
+        usecase "Apply GZIP Compression" as UC28
+        usecase "Check Cache Entry" as UC30
+        usecase "Update Cache Entry" as UC31
     }
 
-    ' File Operations
-    package "File Operations" {
-        usecase "Serve Static File" as UC7
-        usecase "Read File Content" as UC15
-        usecase "Determine MIME Type" as UC16
-        usecase "Send HTTP Response" as UC14
+    package "File System Operations" {
+        usecase "Serve Static Content" as UC7
+        usecase "Read File with Direct IO" as UC15
+        usecase "Detect MIME Type" as UC16
+        usecase "Send HTTP Response with sendfile()" as UC14
     }
 
-    ' Connection Management
     package "Connection Management" {
-        usecase "Manage Connections" as UC8
-        usecase "Handle Client Connection" as UC11
-        usecase "Close Connection" as UC17
+        usecase "Track Active Connections" as UC8
+        usecase "Process Client Connection" as UC11
+        usecase "Close Client Connection" as UC17
     }
 
-    ' Logging System
-    package "Logging" {
-        usecase "Log Activities" as UC9
+    package "Asynchronous Logging" {
+        usecase "Log System Events" as UC9
         usecase "Buffer Log Messages" as UC20
-        usecase "Flush Log Buffer" as UC21
+        usecase "Flush Log Buffer to Disk" as UC21
     }
 
-    ' Server Shutdown
-    package "Shutdown Management" {
-        usecase "Stop Server" as UC10
-        usecase "Handle Signal" as UC25
-        usecase "Graceful Shutdown" as UC26
+    package "Graceful Shutdown" {
+        usecase "Initiate Server Shutdown" as UC10
+        usecase "Handle System Signals" as UC25
+        usecase "Perform Graceful Shutdown" as UC26
     }
 }
 
-' Actor relationships
-Client1 --> UC4
-Client1 --> UC5
-Client2 --> UC4
-Client2 --> UC5
-Client3 --> UC4
-Client3 --> UC5
-Admin --> UC1
-Admin --> UC3
-Admin --> UC10
-Admin --> UC25
+' Actor interactions
+Client1 --> UC4 : HTTP requests
+Client1 --> UC5 : GET requests
+Client2 --> UC4 : Asset requests
+Client2 --> UC18 : Static content
+Client3 --> UC4 : API calls
+Client3 --> UC19 : Dynamic content
+Admin --> UC1 : Configures
+Admin --> UC3 : Manages
+Admin --> UC10 : Controls
+Admin --> UC25 : Monitors
 
-' Include relationships
+' Core relationships
 UC1 ..> UC2 : <<include>>
 UC1 ..> UC22 : <<include>>
 UC1 ..> UC23 : <<include>>
@@ -109,7 +100,7 @@ UC6 ..> UC19 : <<include>>
 UC7 ..> UC15 : <<include>>
 UC7 ..> UC16 : <<include>>
 UC7 ..> UC14 : <<include>>
-UC7 ..> UC31 : <<include>>
+UC7 ..> UC31 : <<extend>>
 
 UC8 ..> UC17 : <<extend>>
 
@@ -131,29 +122,29 @@ UC19 ..> UC7 : <<include>>
 
 UC25 ..> UC10 : <<trigger>>
 
-' Notes
-note "Handles server initialization including\nsocket setup and configuration loading" as N1
+' Technical notes
+note "Initializes all server components including socket\nconfiguration, thread pool, and cache system" as N1
 N1 .. UC1
 
-note "Manages concurrent client connections\nand request processing" as N2
+note "Manages concurrent connections using epoll\nand thread pool for optimal performance" as N2
 N2 .. UC3
 
-note "Implements rate limiting and compression\nas optional request processing steps" as N3
+note "Implements rate limiting and GZIP compression\nwith configurable parameters" as N3
 N3 .. UC5
 
-note "Efficiently serves static files with\nproper MIME type detection" as N4
+note "Optimized static file serving with sendfile(),\ndirect IO, and MIME type detection" as N4
 N4 .. UC7
 
-note "Ensures thread safety and proper\nresource cleanup" as N5
+note "Ensures thread-safe connection handling\nand proper resource management" as N5
 N5 .. UC8
 
-note "Implements asynchronous logging\nwith buffering" as N6
+note "Implements lock-free asynchronous logging\nwith buffering and batch writes" as N6
 N6 .. UC9
 
-note "Ensures graceful shutdown with\nproper resource cleanup" as N7
+note "Ensures clean shutdown with proper\nresource cleanup and connection handling" as N7
 N7 .. UC10
 
-note "Implements caching mechanism for\nimproved performance" as N8
+note "LRU cache implementation with configurable\nsize and expiration policies" as N8
 N8 .. UC30
 
 @enduml
