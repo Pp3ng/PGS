@@ -1,12 +1,3 @@
-/*
- * File: pgs.cpp
- * Author:Z.LuoPeng
- * Date: 2024/10/~~~~~~
- * Description: A static file server with middlewares, rate limiting, and caching
- *
- * 42 is the ultimate answer to life, the universe, and everything!!
- */
-
 #include <iostream>           // std::cout, std::cerr
 #include <cstring>            // strlen()
 #include <sys/socket.h>       // socket(), bind(), listen(), accept()
@@ -32,19 +23,24 @@
 #include <ctime>              // Timestamp
 #include <fcntl.h>            // File control
 #include <map>                // For storing connection info
+#include <set>                // efficient query
 #include <deque>              // For rate limiting
-#include <list>               // For LRU cache
+#include <list>               // For cache
 #include <unordered_map>      // For rate limiting
 #include <unordered_set>      // For asset requests
 #include <chrono>             // For time measurement
-#include <shared_mutex>       // Shared mutex
+#include <shared_mutex>       // shared mutex
 #include <memory>             // Shared pointer
+#include <memory_resource>    // Memory resource
+#include <array>              // For iovec
+#include <string_view>        // efficient string handling
+#include <new>                // memory alignment
 #include <future>             // async tasks
-#include <csignal>            // Signal handling
-#include <atomic>             // Atomic bool flag
+#include <csignal>            // signal handling
+#include <atomic>             // atomic bool flag
 #include <zlib.h>             // zlib compression
 #include <stdexcept>          // std::runtime_error
-#include <nlohmann/json.hpp>  // Parse JSON
+#include <nlohmann/json.hpp>  // parse JSON
 #include "terminal_utils.h"
 
 namespace fs = std::filesystem; // Alias for filesystem namespace
@@ -299,13 +295,26 @@ Logger *Logger::instance = nullptr; // initialize static singleton instance
 class Cache
 {
 private:
-    // entry structure for cache
+    // Cache entry structure for storing file content and metadata - O(1) access time
     struct CacheEntry
     {
         std::vector<char> data;                       // actual content of cached file
         std::string mimeType;                         // MIME type of cached content
         time_t lastModified;                          // last modification time of file
         std::list<std::string>::iterator lruIterator; // iterator pointing to key's position in LRU list
+
+        CacheEntry() : lastModified(0) {}
+
+        // constructor for standard vector - O(n) for data copy
+        CacheEntry(const std::vector<char> &d, const std::string &m, time_t lm,
+                   std::list<std::string>::iterator it)
+            : data(d), mimeType(m), lastModified(lm), lruIterator(it) {}
+
+        // constructor for any vector-like container - O(n) for data copy
+        template <typename Vector>
+        CacheEntry(const Vector &d, const std::string &m, time_t lm,
+                   std::list<std::string>::iterator it)
+            : data(d.begin(), d.end()), mimeType(m), lastModified(lm), lruIterator(it) {}
     };
 
     std::unordered_map<std::string, CacheEntry> cache; // main cache storage (key -> entry mapping)
@@ -324,37 +333,28 @@ private:
     }
 
 public:
-    // constructor with overflow check
+    // constructor with overflow check - O(1)
     explicit Cache(size_t maxSizeMB, std::chrono::seconds maxAge)
         : maxSize(static_cast<size_t>(maxSizeMB) * 1024 * 1024),
           currentSize(0),
           maxAge(maxAge)
     {
         // check for cache size overflow
-        if (maxSize / (1024 * 1024) != maxSizeMB)
-        { // calculate: 1024*1024=1048576(1MB)
+        if (maxSize / (1024 * 1024) != maxSizeMB) // calculate: 1024*1024=1048576(1MB)
+        {
             throw std::overflow_error("Cache size overflow");
         }
     }
 
     // retrieve an item from cache - O(1) average case
-    bool get(const std::string &key, std::vector<char> &data,
-             std::string &mimeType, time_t &lastModified)
+    template <typename Vector>
+    bool get(const std::string &key, Vector &data, std::string &mimeType, time_t &lastModified)
     {
         std::shared_lock<std::shared_mutex> lock(mutex);
         auto it = cache.find(key);
         if (it != cache.end())
         {
-            // Check if cache entry has expired
-            auto now = std::chrono::steady_clock::now();
-            auto lastAccessed = std::chrono::steady_clock::now() -
-                                std::chrono::seconds(maxAge.count());
-            if (lastAccessed > now)
-            {
-                return false; // cache entry has expired
-            }
-
-            data = it->second.data;
+            data.assign(it->second.data.begin(), it->second.data.end());
             mimeType = it->second.mimeType;
             lastModified = it->second.lastModified;
 
@@ -368,27 +368,19 @@ public:
     }
 
     // add or update an item in cache - O(1) average case
-    void set(const std::string &key, const std::vector<char> &data,
+    template <typename Vector>
+    void set(const std::string &key, const Vector &data,
              const std::string &mimeType, time_t lastModified)
     {
         std::unique_lock<std::shared_mutex> lock(mutex);
 
         // if entry already exists, remove it first
-        auto existingIt = cache.find(key);
-        if (existingIt != cache.end())
+        auto it = cache.find(key);
+        if (it != cache.end())
         {
-            currentSize -= existingIt->second.data.size();
-            lruList.erase(existingIt->second.lruIterator);
-            cache.erase(existingIt);
-        }
-
-        // remove least recently used entries until we have enough space
-        while (currentSize + data.size() > maxSize && !lruList.empty())
-        {
-            const std::string &lruKey = lruList.back();
-            currentSize -= cache[lruKey].data.size();
-            cache.erase(lruKey);
-            lruList.pop_back();
+            currentSize -= it->second.data.size();
+            lruList.erase(it->second.lruIterator);
+            cache.erase(it);
         }
 
         // if new entry is too large, don't cache it
@@ -397,14 +389,27 @@ public:
             return;
         }
 
+        // remove least recently used entries until we have enough space
+        while (!lruList.empty() && currentSize + data.size() > maxSize)
+        {
+            const std::string &lruKey = lruList.back();
+            currentSize -= cache[lruKey].data.size();
+            cache.erase(lruKey);
+            lruList.pop_back();
+        }
+
         // add new entry to front of LRU list and cache
         lruList.push_front(key);
-        auto &entry = cache[key];
-        entry.data = data;
-        entry.mimeType = mimeType;
-        entry.lastModified = lastModified;
-        entry.lruIterator = lruList.begin();
-        currentSize += data.size();
+        try
+        {
+            cache.emplace(key, CacheEntry(data, mimeType, lastModified, lruList.begin()));
+            currentSize += data.size();
+        }
+        catch (const std::exception &e)
+        {
+            lruList.pop_front(); // rollback on failure
+            Logger::getInstance()->error("Cache allocation failed: " + std::string(e.what()));
+        }
     }
 
     // clear all items from cache - O(1)
@@ -414,6 +419,28 @@ public:
         cache.clear();
         lruList.clear();
         currentSize = 0;
+    }
+
+    // remove a specific item from cache - O(1) average case
+    bool remove(const std::string &key)
+    {
+        std::unique_lock<std::shared_mutex> lock(mutex);
+        auto it = cache.find(key);
+        if (it != cache.end())
+        {
+            currentSize -= it->second.data.size();
+            lruList.erase(it->second.lruIterator);
+            cache.erase(it);
+            return true;
+        }
+        return false;
+    }
+
+    // check if an item exists in cache - O(1) average case
+    bool exists(const std::string &key)
+    {
+        std::shared_lock<std::shared_mutex> lock(mutex);
+        return cache.find(key) != cache.end();
     }
 
     // get current size of cache in bytes - O(1)
@@ -441,36 +468,6 @@ public:
     {
         std::unique_lock<std::shared_mutex> lock(mutex);
         maxAge = newMaxAge;
-    }
-
-    // remove a specific item from cache - O(1) average case
-    bool remove(const std::string &key)
-    {
-        std::unique_lock<std::shared_mutex> lock(mutex);
-        auto it = cache.find(key);
-        if (it != cache.end())
-        {
-            currentSize -= it->second.data.size();
-            lruList.erase(it->second.lruIterator);
-            cache.erase(it);
-            return true;
-        }
-        return false;
-    }
-
-    // check if an item exists in cache and is not expired - O(1) average case
-    bool exists(const std::string &key)
-    {
-        std::shared_lock<std::shared_mutex> lock(mutex);
-        auto it = cache.find(key);
-        if (it != cache.end())
-        {
-            auto now = std::chrono::steady_clock::now();
-            auto lastAccessed = std::chrono::steady_clock::now() -
-                                std::chrono::seconds(maxAge.count());
-            return lastAccessed <= now;
-        }
-        return false;
     }
 
     // structure to hold cache statistics
@@ -546,26 +543,39 @@ public:
     [[nodiscard]]
     static bool shouldCompress(const std::string &mimeType, size_t contentLength)
     {
-        // check if it's an image type
-        if (mimeType.find("image/") != std::string::npos)
-        {
-            return false; // don't compress images
-        }
+        // define non-compressible mime types using unordered_set for efficient look-up
+        static const std::unordered_set<std::string> nonCompressibleTypes = {
+            "image/png", "image/gif", "image/svg+xml", "image/x-icon", "image/webp",
+            "audio/mpeg", "video/mp4", "video/webm", "application/zip", "font/woff",
+            "font/woff2", "font/ttf", "application/vnd.ms-fontobject"};
 
-        static const std::vector<std::string> compressibleTypes = {
+        // define compressible mime types using unordered_set for efficient look-up
+        static const std::unordered_set<std::string> compressibleTypes = {
             "text/", "application/javascript", "application/json",
-            "application/xml", "application/x-yaml"};
+            "application/xml", "application/x-yaml", "application/x-www-form-urlencoded"};
 
-        if (contentLength < 1024) // 1KB
+        // check if it's a non-compressible type
+        if (nonCompressibleTypes.find(mimeType) != nonCompressibleTypes.end())
         {
             return false;
         }
 
-        return std::any_of(compressibleTypes.begin(), compressibleTypes.end(),
-                           [&mimeType](const std::string &type) // check if the MIME type is compressible
-                           {
-                               return mimeType.find(type) != std::string::npos;
-                           });
+        // don't compress if content length is less than 1kb
+        if (contentLength < 1024)
+        {
+            return false;
+        }
+
+        // Check if MIME type is compressible
+        for (const auto &type : compressibleTypes)
+        {
+            if (mimeType.find(type) == 0) // Check for prefix match
+            {
+                return true;
+            }
+        }
+
+        return false; // default case: do not compress
     }
 
     [[nodiscard]]
@@ -606,7 +616,8 @@ private:
 
         // set input data for compression
         zs.next_in = reinterpret_cast<Bytef *>(const_cast<char *>(data.data())); // input data
-        zs.avail_in = data.size();                                               // size of input data
+        zs.avail_in = data.size();
+        // size of input data
 
         int ret;                         // variable to hold return status of compression
         const size_t bufferSize = 32768; // define size of output buffer (32KB)
@@ -735,26 +746,26 @@ private:
                                  {
                 while (true) {
                     std::function<void()> task;// define a task to execute
-                    
+
                     {
                         std::unique_lock<std::mutex> lock(queueMutex);
-                        
+
                         condition.wait(lock, [this] {
                             return stop_flag || !tasks.empty();// wait for a task or stop flag
                         });
-                        
+
                         if (stop_flag && tasks.empty()) {// check if thread pool is stopped
                             return;
                         }
-                        
+
                         if (!tasks.empty()) {
                             task = std::move(tasks.front());// get next task
                             tasks.pop();
                         }
                     }
-                    
+
                     if (task) {
-                        task();
+                        task();// execute task
                     }
                 } });
         }
@@ -903,33 +914,100 @@ public:
                              Middleware *middleware = nullptr, Cache *cache = nullptr);
     static bool isAssetRequest(const std::string &path)
     {
-        // undordered_set is faster than vector for lookups
-        static const std::unordered_set<std::string> assetExtensions = {
-            ".css", ".js", ".png", ".jpg", ".jpeg", ".gif", ".ico",
-            ".svg", ".woff", ".woff2", ".ttf", ".eot", ".map",
-            ".webp", ".pdf", ".mp4", ".webm", ".mp3", ".wav",
-            ".json", ".xml"};
+        // cache string length to avoid multiple calls
+        const size_t pathLen = path.length();
+        if (pathLen < 4)
+            return false; // Minimum length for an asset (.css)
 
-        static const std::unordered_set<std::string> assetDirs = {
-            "/assets/", "/static/", "/images/", "/img/",
-            "/css/", "/js/", "/fonts/", "/media/"};
+        // convert last 10 chars (max extension length) to lowercase once
+        // this avoids converting the entire path
+        alignas(8) char lastChars[10]; // Aligned for better memory access
+        const size_t checkLen = std::min(pathLen, size_t(10));
+        std::transform(
+            path.end() - checkLen, path.end(),
+            lastChars,
+            ::tolower);
+        std::string_view lastView(lastChars, checkLen);
 
-        // Check if path ends with an asset extension
-        for (const auto &ext : assetExtensions)
+        // Most common image types and web assets first (ordered by frequency)
+        static constexpr std::array<std::string_view, 16> commonExts = {
+            ".jpg", ".png", ".gif", // most frequent image types
+            ".jpeg", ".webp",       // less frequent image types
+            ".css", ".js",          // essential web assets
+            ".ico", ".svg",         // common icons
+            ".woff2", ".woff",      // modern fonts first
+            ".ttf",                 // legacy font
+            ".mp4", ".webm",        // video files
+            ".json", ".xml"         // data files
+        };
+
+        // fast path: check most common extensions first using simd-friendly loop
+        const auto commonExtsSize = commonExts.size();
+        for (size_t i = 0; i < commonExtsSize; ++i)
         {
-            if (path.length() >= ext.length() &&
-                path.compare(path.length() - ext.length(), ext.length(), ext) == 0) // compare file extension
+            const auto &ext = commonExts[i];
+            if (checkLen >= ext.length() &&
+                lastView.compare(checkLen - ext.length(), ext.length(), ext) == 0)
+            {
+                return true;
+            }
+            // early exit after checking most common types
+            if (i == 7 && pathLen > 6)
+                break; // skip less common types for longer paths
+        }
+
+        // less common extensions - now includes previously separate ones
+        static constexpr std::array<std::string_view, 5> rareExts = {
+            ".eot", ".map", ".pdf", ".mp3", ".wav"};
+
+        // check rare extensions only for specific path patterns
+        if (pathLen > 8)
+        { // only check for longer paths
+            size_t dotPos = path.find_last_of('.');
+            if (dotPos != std::string::npos)
+            {
+                std::string_view ext(lastChars + (dotPos - (pathLen - checkLen)),
+                                     checkLen - (dotPos - (pathLen - checkLen)));
+                for (const auto &rareExt : rareExts)
+                {
+                    if (ext == rareExt)
+                        return true;
+                }
+            }
+        }
+
+        // directory check optimization using string_view and branch prediction
+        std::string_view pathView(path);
+
+        // hot path: check most common asset directories first
+        static constexpr std::array<std::string_view, 6> hotDirs = {
+            "/img/", "/images/",   // image directories
+            "/css/", "/js/",       // essential asset directories
+            "/assets/", "/static/" // common resource directories
+        };
+
+        // use likely/unlikely for better branch prediction
+        for (const auto &dir : hotDirs)
+        {
+            if (pathView.starts_with(dir)) [[likely]]
             {
                 return true;
             }
         }
 
-        // Check if path contains an asset directory
-        for (const auto &dir : assetDirs)
+        // cold path: less common directories
+        static constexpr std::array<std::string_view, 3> coldDirs = {
+            "/fonts/", "/media/", "/photos/"};
+
+        // check cold directories only if hot directories didn't match
+        if (pathLen > 7) [[unlikely]]
         {
-            if (path.find(dir) != std::string::npos) // check if path contains an asset directory
+            for (const auto &dir : coldDirs)
             {
-                return true;
+                if (pathView.find(dir) != std::string_view::npos)
+                {
+                    return true;
+                }
             }
         }
 
@@ -954,18 +1032,39 @@ void Http::sendResponse(int client_socket, const std::string &filePath,
                         const std::string &clientIp, bool isIndex,
                         Middleware *middleware, Cache *cache)
 {
-    // constants for optimized I/O
+    // Constants for optimized I/O
     static const size_t BUFFER_SIZE = 65536;      // 64KB buffer size
     static const size_t ALIGNMENT = 512;          // memory alignment boundary
     static const size_t SENDFILE_CHUNK = 1048576; // 1MB sendfile chunk size
     static const int MAX_IOV = IOV_MAX;           // maximum iovec array size
 
-    // set socket options for keep-alive and performance
+    // Create a memory resource for this request
+    std::pmr::monotonic_buffer_resource pool(64 * 1024); // 64KB initial size
+
+    // Performance metrics
+    auto startTime = std::chrono::steady_clock::now();
+    size_t totalBytesSent = 0;
+
+    // RAII wrapper for socket options
+    struct SocketOptionGuard
+    {
+        int &cork;
+        int client_socket;
+        SocketOptionGuard(int &c, int cs) : cork(c), client_socket(cs) {}
+        ~SocketOptionGuard()
+        {
+            cork = 0;
+            setsockopt(client_socket, IPPROTO_TCP, TCP_CORK, &cork, sizeof(cork));
+        }
+    };
+
+    // Socket options
     int keepAlive = 1;
     int keepIdle = 60;
     int keepInterval = 10;
     int keepCount = 3;
-    int cork = 1; // enable TCP_CORK to optimize packet transmission
+    int cork = 1;
+    SocketOptionGuard sockGuard(cork, client_socket);
 
     auto setSocketOption = [&](int level, int optname, const void *optval, socklen_t optlen)
     {
@@ -988,7 +1087,8 @@ void Http::sendResponse(int client_socket, const std::string &filePath,
         return;
     }
 
-    std::vector<char> fileContent;
+    // file content and cache handling
+    std::pmr::vector<char> fileContent{&pool};
     size_t fileSize;
     time_t lastModified;
     bool cacheHit = false;
@@ -1004,8 +1104,28 @@ void Http::sendResponse(int client_socket, const std::string &filePath,
             Logger::getInstance()->info("Cache hit for: " + filePath, clientIp);
         }
     }
+    // file handling with RAII
+    class FileGuard
+    {
+        int fd;
 
-    int fd = -1;
+    public:
+        FileGuard() : fd(-1) {}
+        explicit FileGuard(int f) : fd(f) {}
+        ~FileGuard()
+        {
+            if (fd != -1)
+                close(fd);
+        }
+        int get() const { return fd; }
+        void reset(int f = -1)
+        {
+            if (fd != -1)
+                close(fd);
+            fd = f;
+        }
+    } fileGuard;
+
     if (!cacheHit)
     {
         // open file with O_DIRECT for large files to bypass system cache
@@ -1016,7 +1136,7 @@ void Http::sendResponse(int client_socket, const std::string &filePath,
             flags |= O_DIRECT;
         }
 
-        fd = open(filePath.c_str(), flags);
+        int fd = open(filePath.c_str(), flags);
         if (fd == -1 && errno == EINVAL) // O_DIRECT not supported, fallback to normal open
         {
             fd = open(filePath.c_str(), O_RDONLY);
@@ -1029,6 +1149,7 @@ void Http::sendResponse(int client_socket, const std::string &filePath,
                 clientIp);
             return;
         }
+        fileGuard.reset(fd);
 
         // advise kernel about access pattern for optimal I/O performance
         posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
@@ -1039,7 +1160,6 @@ void Http::sendResponse(int client_socket, const std::string &filePath,
             Logger::getInstance()->error(
                 "Fstat failed: errno=" + std::to_string(errno),
                 clientIp);
-            close(fd);
             return;
         }
 
@@ -1048,7 +1168,7 @@ void Http::sendResponse(int client_socket, const std::string &filePath,
     }
 
     bool isCompressed = false;
-    std::string compressedContent;
+    std::pmr::string compressedContent{&pool};
 
     // compress file content if needed
     if (middleware && Compression::shouldCompress(mimeType, fileSize) && mimeType.find("image/") == std::string::npos)
@@ -1059,120 +1179,117 @@ void Http::sendResponse(int client_socket, const std::string &filePath,
         }
         else
         {
-            // allocate aligned buffer for optimal I/O performance
-            void *alignedBuffer;
-            if (posix_memalign(&alignedBuffer, ALIGNMENT, BUFFER_SIZE) != 0)
+            // Use aligned buffer with RAII
+            struct AlignedBuffer
             {
-                Logger::getInstance()->error("Failed to allocate aligned memory", clientIp);
-                close(fd);
-                return;
-            }
-
-            std::vector<char> buffer;
-            buffer.reserve(fileSize); // pre-allocate to avoid reallocation
+                void *ptr;
+                AlignedBuffer(size_t size, size_t alignment) : ptr(nullptr)
+                {
+                    if (posix_memalign(&ptr, alignment, size) != 0)
+                    {
+                        throw std::bad_alloc();
+                    }
+                }
+                ~AlignedBuffer() { free(ptr); }
+                void *get() { return ptr; }
+            } alignedBuffer(BUFFER_SIZE, ALIGNMENT);
+            std::pmr::vector<char> buffer{&pool};
+            buffer.reserve(fileSize);
 
             size_t totalRead = 0;
             while (totalRead < fileSize)
             {
-                ssize_t bytesRead = read(fd, alignedBuffer, std::min(BUFFER_SIZE, fileSize - totalRead));
+                ssize_t bytesRead = read(fileGuard.get(), alignedBuffer.get(),
+                                         std::min(BUFFER_SIZE, fileSize - totalRead));
                 if (bytesRead <= 0)
                 {
-                    free(alignedBuffer);
                     Logger::getInstance()->error(
                         "Read file failed: errno=" + std::to_string(errno),
                         clientIp);
-                    close(fd);
                     return;
                 }
-                buffer.insert(buffer.end(), static_cast<char *>(alignedBuffer),
-                              static_cast<char *>(alignedBuffer) + bytesRead);
+                buffer.insert(buffer.end(), static_cast<char *>(alignedBuffer.get()),
+                              static_cast<char *>(alignedBuffer.get()) + bytesRead);
                 totalRead += bytesRead;
             }
-            free(alignedBuffer);
 
             compressedContent = middleware->process(std::string(buffer.begin(), buffer.end()));
         }
         isCompressed = true;
         fileSize = compressedContent.size();
-        if (fd != -1)
-        {
-            close(fd);
-            fd = -1;
-        }
     }
 
-    // pre-allocate header string capacity
-    std::string headerStr;
-    headerStr.reserve(1024); // reserve reasonable space for headers
+    // Pre-allocate header string capacity
+    std::pmr::string headerStr{&pool};
+    headerStr.reserve(1024); // Reserve reasonable space for headers
 
-    // generate response headers
+    // Generate response headers
     char timeBuffer[128], lastModifiedBuffer[128];
     time_t now = time(nullptr);
-    struct tm *tm_info = gmtime(&now);
+    struct tm tmBuf;
+    struct tm *tm_info = gmtime_r(&now, &tmBuf); // Thread-safe version
     strftime(timeBuffer, sizeof(timeBuffer), "%a, %d %b %Y %H:%M:%S GMT", tm_info);
 
-    tm_info = gmtime(&lastModified);
+    tm_info = gmtime_r(&lastModified, &tmBuf);
     strftime(lastModifiedBuffer, sizeof(lastModifiedBuffer), "%a, %d %b %Y %H:%M:%S GMT", tm_info);
 
+    // Status message lookup using array for better performance
+    static const char *const STATUS_MESSAGES[] = {
+        "OK",                    // 200
+        nullptr,                 // 201-299
+        nullptr,                 // 300-303
+        "Not Modified",          // 304
+        nullptr,                 // 305-399
+        "Bad Request",           // 400
+        "Unauthorized",          // 401
+        nullptr,                 // 402
+        "Forbidden",             // 403
+        "Not Found",             // 404
+        nullptr,                 // 405-499
+        "Internal Server Error", // 500
+        nullptr,                 // 501-502
+        "Service Unavailable",   // 503
+    };
+
     const char *statusMessage;
-    switch (statusCode)
+    if (statusCode >= 200 && statusCode < static_cast<int>(sizeof(STATUS_MESSAGES) / sizeof(char *)) + 200)
     {
-    case 200:
-        statusMessage = "OK";
-        break;
-    case 304:
-        statusMessage = "Not Modified";
-        break;
-    case 400:
-        statusMessage = "Bad Request";
-        break;
-    case 401:
-        statusMessage = "Unauthorized";
-        break;
-    case 403:
-        statusMessage = "Forbidden";
-        break;
-    case 404:
-        statusMessage = "Not Found";
-        break;
-    case 500:
-        statusMessage = "Internal Server Error";
-        break;
-    case 503:
-        statusMessage = "Service Unavailable";
-        break;
-    default:
+        statusMessage = STATUS_MESSAGES[statusCode - 200];
+        if (!statusMessage)
+            statusMessage = "Unknown Status";
+    }
+    else
+    {
         statusMessage = "Unknown Status";
-        break;
     }
 
-    // assemble response headers
-    std::ostringstream headers;
-    headers << "HTTP/1.1 " << statusCode << " " << statusMessage << "\r\n"
-            << "Server: RobustHTTP/1.0\r\n"
-            << "Date: " << timeBuffer << "\r\n"
-            << "Content-Type: " << mimeType << "\r\n"
-            << "Content-Length: " << fileSize << "\r\n"
-            << "Last-Modified: " << lastModifiedBuffer << "\r\n"
-            << "Connection: keep-alive\r\n"
-            << "Keep-Alive: timeout=60, max=1000\r\n"
-            << "Accept-Ranges: bytes\r\n"
-            << "Cache-Control: public, max-age=31536000\r\n"
-            << "X-Content-Type-Options: nosniff\r\n"
-            << "X-Frame-Options: SAMEORIGIN\r\n"
-            << "X-XSS-Protection: 1; mode=block\r\n";
+    // assemble response headers using string
+    headerStr = "HTTP/1.1 " + std::to_string(statusCode) + " " + statusMessage + "\r\n"
+                                                                                 "Server: RobustHTTP/1.0\r\n"
+                                                                                 "Date: " +
+                std::string(timeBuffer) + "\r\n"
+                                          "Content-Type: " +
+                mimeType + "\r\n"
+                           "Content-Length: " +
+                std::to_string(fileSize) + "\r\n"
+                                           "Last-Modified: " +
+                std::string(lastModifiedBuffer) + "\r\n"
+                                                  "Connection: keep-alive\r\n"
+                                                  "Keep-Alive: timeout=60, max=1000\r\n"
+                                                  "Accept-Ranges: bytes\r\n"
+                                                  "Cache-Control: public, max-age=31536000\r\n"
+                                                  "X-Content-Type-Options: nosniff\r\n"
+                                                  "X-Frame-Options: SAMEORIGIN\r\n"
+                                                  "X-XSS-Protection: 1; mode=block\r\n";
 
     if (isCompressed)
     {
-        headers << "Content-Encoding: gzip\r\n"
-                << "Vary: Accept-Encoding\r\n";
+        headerStr += "Content-Encoding: gzip\r\n"
+                     "Vary: Accept-Encoding\r\n";
     }
-    headers << "\r\n";
-
-    headerStr = headers.str();
-
+    headerStr += "\r\n";
     // optimize writev using maximum allowed iovec structures
-    struct iovec iov[MAX_IOV];
+    std::array<struct iovec, MAX_IOV> iov;
     int iovcnt = 0;
 
     // add header to iovec
@@ -1194,68 +1311,64 @@ void Http::sendResponse(int client_socket, const std::string &filePath,
         iovcnt++;
     }
 
-    // send headers and content using writev
+    // send headers and content using writev with retry logic
     size_t totalSent = 0;
     const size_t totalSize = headerStr.size() +
                              (isCompressed ? compressedContent.size() : (cacheHit ? fileContent.size() : 0));
 
     while (totalSent < totalSize)
     {
-        ssize_t sent = writev(client_socket, iov, iovcnt);
+        ssize_t sent = writev(client_socket, iov.data(), iovcnt);
         if (sent <= 0)
         {
             if (errno == EAGAIN || errno == EWOULDBLOCK)
             {
-                usleep(1000);
+                std::this_thread::sleep_for(std::chrono::microseconds(1000));
                 continue;
             }
             Logger::getInstance()->error(
                 "Failed to send response: errno=" + std::to_string(errno),
                 clientIp);
-            if (fd != -1)
-                close(fd);
             return;
         }
         totalSent += sent;
+        totalBytesSent += sent;
 
-        // update iovec structures
+        // update iovec structures with zero-copy approach
         while (sent > 0 && iovcnt > 0)
         {
-            if (static_cast<size_t>(sent) >= iov[0].iov_len) // check if entire iovec buffer was sent
+            if (static_cast<size_t>(sent) >= iov[0].iov_len)
             {
-                sent -= iov[0].iov_len; // update remaining bytes to send
+                sent -= iov[0].iov_len;
                 iovcnt--;
-                for (int i = 0; i < iovcnt; i++)
-                {
-                    iov[i] = iov[i + 1]; // shift iovec array
-                }
+                std::copy(iov.begin() + 1, iov.begin() + 1 + iovcnt, iov.begin());
             }
             else
             {
-                iov[0].iov_base = static_cast<char *>(iov[0].iov_base) + sent; // update iovec base pointer
-                iov[0].iov_len -= sent;                                        // update iovec length
+                iov[0].iov_base = static_cast<char *>(iov[0].iov_base) + sent;
+                iov[0].iov_len -= sent;
                 break;
             }
         }
     }
 
     // handle large file transfer using sendfile or mmap
-    if (!isCompressed && !cacheHit && fd != -1)
+    if (!isCompressed && !cacheHit && fileGuard.get() != -1)
     {
         off_t offset = 0;
         bool useMmap = false;
 
-        // try sendfile with optimal chunk size
+        // try sendfile with optimal chunk size and retry logic
         while (offset < static_cast<off_t>(fileSize))
         {
             size_t chunk = std::min(SENDFILE_CHUNK, fileSize - offset);
-            ssize_t sent = sendfile(client_socket, fd, &offset, chunk);
+            ssize_t sent = sendfile(client_socket, fileGuard.get(), &offset, chunk);
 
             if (sent == -1)
             {
                 if (errno == EAGAIN || errno == EWOULDBLOCK)
                 {
-                    usleep(1000);
+                    std::this_thread::sleep_for(std::chrono::microseconds(1000));
                     continue;
                 }
                 else if (errno == EINVAL || errno == ENOSYS)
@@ -1266,7 +1379,6 @@ void Http::sendResponse(int client_socket, const std::string &filePath,
                 Logger::getInstance()->error(
                     "Failed to send file: errno=" + std::to_string(errno),
                     clientIp);
-                close(fd);
                 return;
             }
             else if (sent == 0)
@@ -1274,37 +1386,46 @@ void Http::sendResponse(int client_socket, const std::string &filePath,
                 break;
             }
             totalSent += sent;
+            totalBytesSent += sent;
         }
 
-        // fall back to mmap for large files
+        // fall back to mmap for large files with huge pages support
         if (useMmap)
         {
-            // use huge pages for large files
             int flags = MAP_PRIVATE;
             if (fileSize >= 2 * 1024 * 1024) // 2MB threshold for huge pages
             {
                 flags |= MAP_HUGETLB;
             }
 
-            void *mmapAddr = mmap(nullptr, fileSize, PROT_READ, flags, fd, 0);
-            if (mmapAddr == MAP_FAILED)
+            void *mmapAddr = mmap(nullptr, fileSize, PROT_READ, flags, fileGuard.get(), 0);
+            if (mmapAddr == MAP_FAILED && (flags & MAP_HUGETLB))
             {
-                // retry without huge pages if it failed
-                if (flags & MAP_HUGETLB)
-                {
-                    mmapAddr = mmap(nullptr, fileSize, PROT_READ, MAP_PRIVATE, fd, 0);
-                }
-                if (mmapAddr == MAP_FAILED)
-                {
-                    Logger::getInstance()->error(
-                        "Mmap failed: errno=" + std::to_string(errno),
-                        clientIp);
-                    close(fd);
-                    return;
-                }
+                flags &= ~MAP_HUGETLB;
+                mmapAddr = mmap(nullptr, fileSize, PROT_READ, flags, fileGuard.get(), 0);
             }
 
-            // advise sequential access pattern
+            if (mmapAddr == MAP_FAILED)
+            {
+                Logger::getInstance()->error(
+                    "Mmap failed: errno=" + std::to_string(errno),
+                    clientIp);
+                return;
+            }
+
+            // RAII for mmap
+            struct MMapGuard
+            {
+                void *addr;
+                size_t length;
+                MMapGuard(void *a, size_t l) : addr(a), length(l) {}
+                ~MMapGuard()
+                {
+                    if (addr != MAP_FAILED)
+                        munmap(addr, length);
+                }
+            } mmapGuard(mmapAddr, fileSize);
+
             madvise(mmapAddr, fileSize, MADV_SEQUENTIAL);
 
             const char *fileContent = static_cast<const char *>(mmapAddr);
@@ -1319,61 +1440,52 @@ void Http::sendResponse(int client_socket, const std::string &filePath,
                 {
                     if (errno == EAGAIN || errno == EWOULDBLOCK)
                     {
-                        usleep(1000);
+                        std::this_thread::sleep_for(std::chrono::microseconds(1000));
                         continue;
                     }
                     Logger::getInstance()->error(
                         "Failed to send mmap data: errno=" + std::to_string(errno),
                         clientIp);
-                    munmap(mmapAddr, fileSize);
-                    close(fd);
                     return;
                 }
                 bytesSent += sent;
                 remainingBytes -= sent;
-                totalSent += sent;
+                totalBytesSent += sent;
             }
-
-            munmap(mmapAddr, fileSize);
         }
 
         // update cache if needed
         if (cache && statusCode == 200)
         {
-            // allocate aligned buffer for cache update
-            void *alignedBuffer;
-            if (posix_memalign(&alignedBuffer, ALIGNMENT, BUFFER_SIZE) == 0)
-            {
-                std::vector<char> content;
-                content.reserve(fileSize); // pre-allocate to avoid reallocation
+            std::pmr::vector<char> content{&pool};
+            content.reserve(fileSize);
 
-                lseek(fd, 0, SEEK_SET);
+            if (lseek(fileGuard.get(), 0, SEEK_SET) != -1)
+            {
+                std::unique_ptr<char[]> alignedBuffer(new (std::align_val_t{ALIGNMENT}) char[BUFFER_SIZE]);
                 size_t totalRead = 0;
                 while (totalRead < fileSize)
                 {
-                    ssize_t bytesRead = read(fd, alignedBuffer,
-                                             std::min(BUFFER_SIZE, fileSize - totalRead)); // read file in chunks
+                    ssize_t bytesRead = read(fileGuard.get(), alignedBuffer.get(),
+                                             std::min(BUFFER_SIZE, fileSize - totalRead));
                     if (bytesRead <= 0)
                         break;
-                    content.insert(content.end(), static_cast<char *>(alignedBuffer),
-                                   static_cast<char *>(alignedBuffer) + bytesRead); // append to content vector
+                    content.insert(content.end(), alignedBuffer.get(),
+                                   alignedBuffer.get() + bytesRead);
                     totalRead += bytesRead;
                 }
-                free(alignedBuffer);
 
                 if (totalRead == fileSize)
                 {
-                    cache->set(filePath, content, mimeType, lastModified); // update cache with file content
+                    cache->set(filePath, content, mimeType, lastModified);
                 }
             }
         }
-
-        close(fd);
     }
 
-    // Disable TCP_CORK to flush any remaining data
-    cork = 0;
-    setSocketOption(IPPROTO_TCP, TCP_CORK, &cork, sizeof(cork));
+    // record performance metrics
+    auto endTime = std::chrono::steady_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(endTime - startTime);
 
     if (isIndex)
     {
@@ -1382,7 +1494,9 @@ void Http::sendResponse(int client_socket, const std::string &filePath,
                 ", path=" + filePath +
                 ", size=" + std::to_string(fileSize) +
                 ", type=" + mimeType +
-                ", cache=" + (cacheHit ? "HIT" : "MISS"),
+                ", cache=" + (cacheHit ? "HIT" : "MISS") +
+                ", time=" + std::to_string(duration.count()) + "µs" +
+                ", bytes=" + std::to_string(totalBytesSent),
             clientIp);
     }
 }
@@ -1407,92 +1521,207 @@ private:
 };
 
 [[nodiscard]]
-std::string Router::getMimeType(const std::string &path) // calculate MIME type based on file extension
+std::string Router::getMimeType(const std::string &path)
 {
-    // Define a map of file extensions to MIME types
-    static const std::unordered_map<std::string, std::string> mimeTypes = {
-        {".html", "text/html"},
+    // cache frequently used MIME types for quick access
+    static const std::string TEXT_HTML = "text/html";
+    static const std::string TEXT_PLAIN = "text/plain";
+    static const std::string IMAGE_JPEG = "image/jpeg";
+
+    // define sets of extensions that map to the same MIME type
+    static const std::set<std::string_view> htmlExts = {".html", ".htm"};
+    static const std::set<std::string_view> jpegExts = {".jpg", ".jpeg"};
+
+    // define valid extensions set for quick validation
+    static const std::set<std::string_view> validExts = {
+        ".html", ".htm", ".css", ".js", ".json", ".png",
+        ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".txt",
+        ".pdf", ".xml", ".zip", ".woff", ".woff2", ".ttf",
+        ".eot", ".mp3", ".mp4", ".webm", ".webp"};
+
+    // define MIME type mappings for validated extensions
+    static const std::unordered_map<std::string_view, std::string_view> mimeTypes = {
         {".css", "text/css"},
         {".js", "application/javascript"},
+        {".json", "application/json"},
         {".png", "image/png"},
-        {".jpg", "image/jpeg"},
-        {".jpeg", "image/jpeg"},
-        {".gif", "image/gif"}};
+        {".gif", "image/gif"},
+        {".svg", "image/svg+xml"},
+        {".ico", "image/x-icon"},
+        {".txt", "text/plain"},
+        {".pdf", "application/pdf"},
+        {".xml", "application/xml"},
+        {".zip", "application/zip"},
+        {".woff", "font/woff"},
+        {".woff2", "font/woff2"},
+        {".ttf", "font/ttf"},
+        {".eot", "application/vnd.ms-fontobject"},
+        {".mp3", "audio/mpeg"},
+        {".mp4", "video/mp4"},
+        {".webm", "video/webm"},
+        {".webp", "image/webp"}};
 
-    std::string lowerPath = path;
-    std::transform(lowerPath.begin(), lowerPath.end(), lowerPath.begin(), ::tolower); // convert path to lowercase
-    // Use ends_with to find appropriate MIME type
-    for (const auto &entry : mimeTypes)
+    // find last dot in path
+    size_t dotPos = path.find_last_of('.');
+    if (dotPos == std::string::npos)
     {
-        if (lowerPath.ends_with(entry.first)) // check if path ends with file extension
-        {
-            return entry.second; // return MIME type
-        }
+        return TEXT_PLAIN;
     }
 
-    return "text/plain"; // Default MIME type
+    // extract extension and convert to lowercase using string_view
+    // this avoids string allocation for the extension
+    char lastChars[10]; // max extension length
+    const size_t extLen = std::min(path.length() - dotPos, size_t(10));
+    std::transform(
+        path.begin() + dotPos,
+        path.begin() + dotPos + extLen,
+        lastChars,
+        ::tolower);
+    std::string_view ext(lastChars, extLen);
+
+    // quick validation check
+    if (!validExts.contains(ext))
+    {
+        return TEXT_PLAIN;
+    }
+
+    // fast path for most common types
+    if (htmlExts.contains(ext))
+    {
+        return TEXT_HTML;
+    }
+    if (jpegExts.contains(ext))
+    {
+        return IMAGE_JPEG;
+    }
+
+    // look up MIME type for other extensions
+    auto it = mimeTypes.find(ext);
+    return it != mimeTypes.end() ? std::string(it->second) : TEXT_PLAIN;
 }
 
-void Router::route(const std::string &path, int client_socket, const std::string &clientIp, Middleware *middleware, Cache *cache)
+void Router::route(const std::string &path, int client_socket, const std::string &clientIp,
+                   Middleware *middleware, Cache *cache)
 {
-    std::string filePath = staticFolder + path;
-    bool isIndex = (path == "/index.html" || path == "/" || fs::is_directory(filePath));
-    bool isAsset = Http::isAssetRequest(path);
+    // pre-allocate string capacity to avoid reallocation
+    // +11 accounts for potential "/index.html" addition
+    std::string filePath;
+    filePath.reserve(staticFolder.size() + path.size() + 11);
+    filePath = staticFolder;
+    filePath += path;
 
-    if (fs::is_directory(filePath))
+    // normalize path to lowercase for case-insensitive comparison
+    // using a separate string to preserve original path for logging
+    std::string normalizedPath = path;
+    std::transform(normalizedPath.begin(), normalizedPath.end(), normalizedPath.begin(), ::tolower);
+
+    // use string_view for efficient string operations
+    // this avoids string copies during comparisons
+    std::string_view pathView(normalizedPath);
+
+    // cache filesystem check results to avoid redundant calls
+    bool isDir = fs::is_directory(filePath);
+    bool isIndex = (pathView == "/index.html" || pathView == "/" || isDir);
+    bool isAsset = Http::isAssetRequest(normalizedPath);
+
+    // append index.html for directory paths
+    if (isDir)
     {
         filePath += "/index.html";
     }
 
+    // log non-asset index requests
     if (!isAsset && isIndex)
     {
         Logger::getInstance()->info("Processing request: " + path, clientIp);
     }
 
-    if (!fs::exists(filePath) || fs::is_directory(filePath))
+    // static response for 404 errors
+    // this avoids creating the string repeatedly
+    static const char *SIMPLE_404_RESPONSE =
+        "HTTP/1.1 404 Not Found\r\n"
+        "Content-Type: text/plain\r\n"
+        "Content-Length: 9\r\n"
+        "\r\n"
+        "Not Found";
+
+    // cache for 404.html content
+    // using static variables and std::once_flag for thread-safe initialization
+    static std::string cached404Content;
+    static std::once_flag flag404;
+    static bool has404File = false;
+
+    // check if file exists and handle 404 errors
+    if (!fs::exists(filePath) || (isDir && !fs::exists(filePath)))
     {
+        // log warning for non-asset requests
         if (!isAsset)
         {
             Logger::getInstance()->warning("File not found: " + filePath, clientIp);
         }
 
-        // read 404.html
-        std::ifstream file("404.html");
-        if (!file)
+        // initialize 404.html content only once
+        // this is thread-safe due to std::call_once
+        std::call_once(flag404, [&]()
+                       {
+            std::ifstream file("404.html", std::ios::binary);
+            if (file) {
+                has404File = true;
+                // efficient file reading using iterators
+                cached404Content.assign(
+                    std::istreambuf_iterator<char>(file),
+                    std::istreambuf_iterator<char>()
+                );
+            } });
+
+        // send simple 404 response if custom 404.html doesn't exist
+        if (!has404File)
         {
-            // if 404.html not found, send a simple 404 response
-            const char *response =
-                "HTTP/1.1 404 Not Found\r\n"
-                "Content-Type: text/plain\r\n"
-                "Content-Length: 9\r\n"
-                "\r\n"
-                "Not Found";
-            send(client_socket, response, strlen(response), 0);
+            // use MSG_NOSIGNAL to prevent SIGPIPE
+            send(client_socket, SIMPLE_404_RESPONSE, strlen(SIMPLE_404_RESPONSE), MSG_NOSIGNAL);
             return;
         }
 
-        // read 404.html content
-        std::ostringstream buffer;
-        buffer << file.rdbuf();
-        std::string content = buffer.str();
-
-        // assemble 404 response
-        std::string response =
+        // static response header for 404 errors
+        // this is shared across all 404 responses
+        static const std::string RESPONSE_404_HEADER =
             "HTTP/1.1 404 Not Found\r\n"
             "Content-Type: text/html\r\n"
-            "Content-Length: " +
-            std::to_string(content.size()) + "\r\n"
-                                             "Connection: close\r\n" // close connection after sending response
-                                             "\r\n" +
-            content;
+            "Connection: close\r\n"
+            "Content-Length: ";
 
-        // send 404 response
-        send(client_socket, response.c_str(), response.size(), 0);
+        // use writev for efficient response sending
+        // this minimizes the number of system calls
+        struct iovec iov[4]; // array of io vectors for writev
+        std::string contentLength = std::to_string(cached404Content.size());
+        static const char *CRLF = "\r\n\r\n";
+
+        // set up io vectors for response components
+        iov[0].iov_base = const_cast<char *>(RESPONSE_404_HEADER.data());
+        iov[0].iov_len = RESPONSE_404_HEADER.size();
+        iov[1].iov_base = const_cast<char *>(contentLength.data());
+        iov[1].iov_len = contentLength.size();
+        iov[2].iov_base = const_cast<char *>(CRLF);
+        iov[2].iov_len = 4; // Length of "\r\n\r\n"
+        iov[3].iov_base = const_cast<char *>(cached404Content.data());
+        iov[3].iov_len = cached404Content.size();
+
+        // send all components in a single system call
+        if (writev(client_socket, iov, 4) == -1)
+        {
+            Logger::getInstance()->error("Failed to send 404 response: " + std::string(strerror(errno)), clientIp);
+        }
         return;
     }
 
+    // get mime type and send response
+    // note: getmimetype is assumed to be case-insensitive
     std::string mimeType = getMimeType(filePath);
-    Http::sendResponse(client_socket, filePath, mimeType, 200, clientIp, !isAsset && isIndex, middleware, cache);
+
+    // send the response using the optimized http::sendresponse method
+    // the !isasset && isindex parameter determines whether to log the response
+    Http::sendResponse(client_socket, filePath, mimeType, 200, clientIp,
+                       !isAsset && isIndex, middleware, cache);
 }
 
 class Parser
