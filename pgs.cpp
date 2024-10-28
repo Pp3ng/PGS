@@ -124,7 +124,7 @@ private:
         // start background logging thread
         loggerThread = std::thread(&Logger::processLogs, this);
         // deliberately don't call info() here to avoid recursion
-        writeLogMessage(LogMessage("Logger initialized", "INFO", "-"));
+        writeLogMessage(LogMessage("Logger initialized", "SUCCESS", "-"));
     }
 
     // process logs in background thread
@@ -755,8 +755,6 @@ private:
 
 Socket::Socket(int port) : port(port)
 {
-    Logger::getInstance()->info("Creating dual-stack socket on port: " + std::to_string(port));
-
     // Create a dual-stack socket
     server_fd = socket(AF_INET6, SOCK_STREAM, 0);
     if (server_fd == -1)
@@ -808,7 +806,6 @@ void Socket::bind()
 void Socket::listen()
 {
     ::listen(server_fd, 42); // 42 is the ultimate answer to life, the universe, and everything
-    Logger::getInstance()->info("Server listening on port " + std::to_string(port));
 }
 void Socket::closeSocket()
 {
@@ -1363,7 +1360,7 @@ class Router
 public:
     Router(const std::string &staticFolder) : staticFolder(staticFolder)
     {
-        Logger::getInstance()->info("Router initialized with static folder: " + staticFolder);
+        Logger::getInstance()->success("Router initialized with static folder: " + staticFolder);
     }
     void route(const std::string &path, int client_socket, const std::string &clientIp, Middleware *middleware, Cache *cache);
     [[nodiscard]]
@@ -1720,20 +1717,22 @@ Server::Server(int port, const std::string &staticFolder, int threadCount, int m
       rateLimiter(maxRequests, std::chrono::seconds(timeWindow)),
       cache(cacheSizeMB, std::chrono::seconds(maxAgeSeconds))
 {
-    Logger::getInstance()->info("Server initialized with port: " + std::to_string(port) +
-                                ", static folder: " + staticFolder +
-                                ", thread count: " + std::to_string(threadCount) +
-                                ", rate limit: " + std::to_string(maxRequests) +
-                                " requests per " + std::to_string(timeWindow) + " seconds" +
-                                ", cache size: " + std::to_string(cacheSizeMB) + "MB" +
-                                ", cache max age: " + std::to_string(maxAgeSeconds) + " seconds");
+    std::ostringstream oss;
+    oss << "Creating dual-stack server on port: " << port
+        << ", static folder: " << staticFolder
+        << ", thread count: " << threadCount
+        << ", rate limit: " << maxRequests << " requests per " << timeWindow << " seconds"
+        << ", cache size: " << cacheSizeMB << "MB"
+        << ", cache max age: " << maxAgeSeconds << " seconds";
+
+    Logger::getInstance()->info(oss.str());
     socket.bind();
     socket.listen();
 }
 
 void Server::start()
 {
-    Logger::getInstance()->info("Server starting up...");
+    Logger::getInstance()->success("Server starting up...");
 
     try
     {
@@ -1743,7 +1742,7 @@ void Server::start()
 
         // add server socket to epoll
         epoll.add(socket.getSocketFd(), EPOLLIN);
-        Logger::getInstance()->info("Server is ready and waiting for connections...");
+        Logger::getInstance()->success("Server is ready and waiting for connections...");
 
         while (!shouldStop)
         {
