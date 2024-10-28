@@ -1,46 +1,47 @@
-#include <iostream>           // std::cout, std::cerr
-#include <cstring>            // strlen()
-#include <sys/socket.h>       // socket(), bind(), listen(), accept()
-#include <sys/sendfile.h>     // sendfile
-#include <sys/stat.h>         // fstat
-#include <sys/uio.h>          // writev
-#include <sys/mman.h>         // mmap
-#include <arpa/inet.h>        // inet_ntoa
-#include <netinet/tcp.h>      // TCP_KEEPIDLE, TCP_KEEPINTVL, TCP_KEEPCNT
-#include <netinet/in.h>       // sockaddr_in
-#include <unistd.h>           // close() function
-#include <sys/epoll.h>        // Epoll model
-#include <thread>             // std::thread
-#include <vector>             // std::vector
-#include <algorithm>          // std::transform
-#include <queue>              // std::queue
-#include <mutex>              // std::mutex
-#include <condition_variable> // std::condition_variable
-#include <functional>         // std::function
-#include <fstream>            // File reading
-#include <sstream>            // String stream
-#include <filesystem>         // Filesystem
-#include <ctime>              // Timestamp
-#include <fcntl.h>            // File control
-#include <map>                // For storing connection info
-#include <set>                // efficient query
-#include <deque>              // For rate limiting
-#include <list>               // For cache
-#include <unordered_map>      // For rate limiting
-#include <unordered_set>      // For asset requests
-#include <chrono>             // For time measurement
-#include <shared_mutex>       // shared mutex
-#include <memory>             // Shared pointer
-#include <memory_resource>    // Memory resource
-#include <array>              // For iovec
-#include <string_view>        // efficient string handling
+#include <iostream>           // std::cout, std::cerr - for console output
+#include <cstring>            // strlen() - for string manipulation
+#include <sys/socket.h>       // socket(), bind(), listen(), accept() - for socket operations
+#include <sys/sendfile.h>     // sendfile - for efficient file sending
+#include <sys/stat.h>         // fstat - to get file status
+#include <sys/uio.h>          // writev - to write to multiple buffers
+#include <sys/mman.h>         // mmap - for memory-mapped file access
+#include <arpa/inet.h>        // inet_ntoa - for converting IP addresses
+#include <netinet/tcp.h>      // TCP_KEEPIDLE, TCP_KEEPINTVL, TCP_KEEPCNT - TCP connection keepalive options
+#include <netinet/in.h>       // sockaddr_in - structure for IPv4 addresses
+#include <unistd.h>           // close() function - to close file descriptors
+#include <sys/epoll.h>        // epoll - for scalable I/O event notification
+#include <fstream>            // file reading operations
+#include <sstream>            // string stream manipulations
+#include <filesystem>         // filesystem operations
+#include <ctime>              // handling timestamps
+#include <fcntl.h>            // file control options
+#include <map>                // ordered associative container (Red-Black Tree)
+#include <set>                // ordered unique elements (Red-Black Tree)
+#include <deque>              // double-ended queue
+#include <list>               // doubly linked list for cache implementation
+#include <thread>             // multithreading support
+#include <vector>             // dynamic array
+#include <algorithm>          // applying transformations
+#include <queue>              // queue data structure
+#include <mutex>              // thread synchronization
+#include <condition_variable> // blocking thread synchronization
+#include <functional>         // function objects
+#include <unordered_map>      // unordered associative container (Hash Table)
+#include <unordered_set>      // unordered unique elements (Hash Table)
+#include <chrono>             // measuring time
+#include <shared_mutex>       // shared mutexes
+#include <memory>             // smart pointers
+#include <memory_resource>    // memory resource management
+#include <array>              // fixed-size arrays
+#include <string_view>        // efficient string handling without ownership
 #include <new>                // memory alignment
-#include <future>             // async tasks
+#include <future>             // asynchronous tasks
 #include <csignal>            // signal handling
-#include <atomic>             // atomic bool flag
+#include <atomic>             // atomic operations
 #include <zlib.h>             // zlib compression
-#include <stdexcept>          // std::runtime_error
-#include <nlohmann/json.hpp>  // parse JSON
+#include <stdexcept>          // standard exceptions like std::runtime_error
+#include <nlohmann/json.hpp>  // JSON parsing
+
 #include "terminal_utils.h"
 
 namespace fs = std::filesystem; // Alias for filesystem namespace
