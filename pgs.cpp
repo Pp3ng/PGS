@@ -33,6 +33,7 @@
 #include <fcntl.h>            // File control
 #include <map>                // For storing connection info
 #include <deque>              // For rate limiting
+#include <list>               // For LRU cache
 #include <unordered_map>      // For rate limiting
 #include <unordered_set>      // For asset requests
 #include <chrono>             // For time measurement
@@ -298,71 +299,96 @@ Logger *Logger::instance = nullptr; // initialize static singleton instance
 class Cache
 {
 private:
-    // structure to hold cache entry data
+    // entry structure for cache
     struct CacheEntry
     {
-        std::vector<char> data;                             // actual content of cached file
-        std::string mimeType;                               // mIME type of cached content
-        time_t lastModified;                                // last modification time of file
-        std::chrono::steady_clock::time_point lastAccessed; // last access time of this cache entry
+        std::vector<char> data;                       // actual content of cached file
+        std::string mimeType;                         // MIME type of cached content
+        time_t lastModified;                          // last modification time of file
+        std::list<std::string>::iterator lruIterator; // iterator pointing to key's position in LRU list
     };
 
-    std::unordered_map<std::string, CacheEntry> cache; // main cache storage
+    std::unordered_map<std::string, CacheEntry> cache; // main cache storage (key -> entry mapping)
+    std::list<std::string> lruList;                    // LRU order tracking list (most recent -> least recent)
     mutable std::shared_mutex mutex;                   // mutex for thread-safe operations
     size_t maxSize;                                    // maximum size of cache in bytes
     size_t currentSize;                                // current size of cache in bytes
     std::chrono::seconds maxAge;                       // maximum age of cache entries
 
+    // helper function to update LRU order - O(1) operation
+    void updateLRU(const std::string &key)
+    {
+        lruList.erase(cache[key].lruIterator);    // remove from current position
+        lruList.push_front(key);                  // add to front (most recently used)
+        cache[key].lruIterator = lruList.begin(); // update iterator
+    }
+
 public:
+    // constructor with overflow check
     explicit Cache(size_t maxSizeMB, std::chrono::seconds maxAge)
         : maxSize(static_cast<size_t>(maxSizeMB) * 1024 * 1024),
           currentSize(0),
           maxAge(maxAge)
     {
         // check for cache size overflow
-        if (maxSize / (1024 * 1024) != maxSizeMB) // calculate: 1024*1024=1048576(1MB)
-        {
+        if (maxSize / (1024 * 1024) != maxSizeMB)
+        { // calculate: 1024*1024=1048576(1MB)
             throw std::overflow_error("Cache size overflow");
         }
     }
 
-    // retrieve an item from cache
-    bool get(const std::string &key, std::vector<char> &data, std::string &mimeType, time_t &lastModified)
+    // retrieve an item from cache - O(1) average case
+    bool get(const std::string &key, std::vector<char> &data,
+             std::string &mimeType, time_t &lastModified)
     {
         std::shared_lock<std::shared_mutex> lock(mutex);
         auto it = cache.find(key);
         if (it != cache.end())
         {
+            // Check if cache entry has expired
             auto now = std::chrono::steady_clock::now();
-            // check if cache entry has expired
-            if (now - it->second.lastAccessed > maxAge)
+            auto lastAccessed = std::chrono::steady_clock::now() -
+                                std::chrono::seconds(maxAge.count());
+            if (lastAccessed > now)
             {
                 return false; // cache entry has expired
             }
+
             data = it->second.data;
             mimeType = it->second.mimeType;
             lastModified = it->second.lastModified;
-            it->second.lastAccessed = now; // update last access time
+
+            // update LRU order under exclusive lock
+            lock.unlock();
+            std::unique_lock<std::shared_mutex> uniqueLock(mutex);
+            updateLRU(key);
             return true;
         }
         return false; // cache miss
     }
 
-    // add or update an item in cache
-    void set(const std::string &key, const std::vector<char> &data, const std::string &mimeType, time_t lastModified)
+    // add or update an item in cache - O(1) average case
+    void set(const std::string &key, const std::vector<char> &data,
+             const std::string &mimeType, time_t lastModified)
     {
         std::unique_lock<std::shared_mutex> lock(mutex);
 
-        // if cache is full, remove oldest entries until there's enough space
-        while (currentSize + data.size() > maxSize && !cache.empty())
+        // if entry already exists, remove it first
+        auto existingIt = cache.find(key);
+        if (existingIt != cache.end())
         {
-            auto oldest = std::min_element(cache.begin(), cache.end(),
-                                           [](const auto &a, const auto &b)
-                                           {
-                                               return a.second.lastAccessed < b.second.lastAccessed;
-                                           });
-            currentSize -= oldest->second.data.size();
-            cache.erase(oldest);
+            currentSize -= existingIt->second.data.size();
+            lruList.erase(existingIt->second.lruIterator);
+            cache.erase(existingIt);
+        }
+
+        // remove least recently used entries until we have enough space
+        while (currentSize + data.size() > maxSize && !lruList.empty())
+        {
+            const std::string &lruKey = lruList.back();
+            currentSize -= cache[lruKey].data.size();
+            cache.erase(lruKey);
+            lruList.pop_back();
         }
 
         // if new entry is too large, don't cache it
@@ -371,51 +397,53 @@ public:
             return;
         }
 
-        // add or update cache entry
+        // add new entry to front of LRU list and cache
+        lruList.push_front(key);
         auto &entry = cache[key];
         entry.data = data;
         entry.mimeType = mimeType;
         entry.lastModified = lastModified;
-        entry.lastAccessed = std::chrono::steady_clock::now();
+        entry.lruIterator = lruList.begin();
         currentSize += data.size();
     }
 
-    // clear all items from cache
+    // clear all items from cache - O(1)
     void clear()
     {
         std::unique_lock<std::shared_mutex> lock(mutex);
         cache.clear();
+        lruList.clear();
         currentSize = 0;
     }
 
-    // get current size of cache in bytes
+    // get current size of cache in bytes - O(1)
     size_t size() const
     {
         std::shared_lock<std::shared_mutex> lock(mutex);
         return currentSize;
     }
 
-    // get number of items in cache
+    // get number of items in cache - O(1)
     size_t count() const
     {
         std::shared_lock<std::shared_mutex> lock(mutex);
         return cache.size();
     }
 
-    // get maximum age of cache entries
+    // get maximum age of cache entries - O(1)
     std::chrono::seconds getMaxAge() const
     {
-        return maxAge;
+        return maxAge; // no lock needed for immutable value
     }
 
-    // Set a new maximum age for cache entries
+    // set a new maximum age for cache entries - O(1)
     void setMaxAge(std::chrono::seconds newMaxAge)
     {
         std::unique_lock<std::shared_mutex> lock(mutex);
         maxAge = newMaxAge;
     }
 
-    // remove a specific item from cache
+    // remove a specific item from cache - O(1) average case
     bool remove(const std::string &key)
     {
         std::unique_lock<std::shared_mutex> lock(mutex);
@@ -423,13 +451,14 @@ public:
         if (it != cache.end())
         {
             currentSize -= it->second.data.size();
+            lruList.erase(it->second.lruIterator);
             cache.erase(it);
             return true;
         }
         return false;
     }
 
-    // check if an item exists in cache and is not expired
+    // check if an item exists in cache and is not expired - O(1) average case
     bool exists(const std::string &key)
     {
         std::shared_lock<std::shared_mutex> lock(mutex);
@@ -437,20 +466,23 @@ public:
         if (it != cache.end())
         {
             auto now = std::chrono::steady_clock::now();
-            return (now - it->second.lastAccessed <= maxAge);
+            auto lastAccessed = std::chrono::steady_clock::now() -
+                                std::chrono::seconds(maxAge.count());
+            return lastAccessed <= now;
         }
         return false;
     }
 
-    // Get cache statistics
+    // structure to hold cache statistics
     struct CacheStats
     {
-        size_t currentSize;
-        size_t maxSize;
-        size_t itemCount;
-        std::chrono::seconds maxAge;
+        size_t currentSize;          // current cache size in bytes
+        size_t maxSize;              // maximum cache size in bytes
+        size_t itemCount;            // number of items in cache
+        std::chrono::seconds maxAge; // maximum age of cache entries
     };
 
+    // get cache statistics - O(1)
     CacheStats getStats() const
     {
         std::shared_lock<std::shared_mutex> lock(mutex);
