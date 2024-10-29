@@ -12,10 +12,13 @@ rectangle "PGS High-Performance Server System" {
     package "Server Initialization" {
         usecase "Initialize Server Components" as UC1
         usecase "Parse JSON Configuration" as UC2
-        usecase "Configure TCP Socket Options" as UC22
-        usecase "Create IPv4/IPv6 Dual-Stack Socket" as UC23
-        usecase "Enable Non-Blocking IO Mode" as UC24
-        usecase "Initialize LRU Cache System" as UC29
+        usecase "Configure TCP Socket Options" as UC22 #lightblue
+        usecase "Create IPv4/IPv6 Dual-Stack Socket" as UC23 #lightblue
+        usecase "Enable Non-Blocking IO Mode" as UC24 #lightblue
+        usecase "Initialize LRU Cache System" as UC29 #lightyellow
+        usecase "Setup Thread Pool Affinity" as UC32 #lightgreen
+        usecase "Configure Rate Limiter" as UC33 #lightpink
+        usecase "Initialize Epoll Instance" as UC34 #lightgray
     }
 
     package "Core Server Operations" {
@@ -23,6 +26,8 @@ rectangle "PGS High-Performance Server System" {
         usecase "Accept Client Connection" as UC4
         usecase "Manage Thread Pool Workers" as UC12
         usecase "Handle Epoll Events" as UC13
+        usecase "Monitor Connection Timeouts" as UC35 #lightgray
+        usecase "Balance Thread Load" as UC36 #lightgreen
     }
 
     package "Request Processing Pipeline" {
@@ -34,6 +39,8 @@ rectangle "PGS High-Performance Server System" {
         usecase "Apply GZIP Compression" as UC28
         usecase "Check Cache Entry" as UC30
         usecase "Update Cache Entry" as UC31
+        usecase "Validate Client Compression Support" as UC37 #lightyellow
+        usecase "Check MIME Type Compressibility" as UC38 #lightyellow
     }
 
     package "File System Operations" {
@@ -41,110 +48,142 @@ rectangle "PGS High-Performance Server System" {
         usecase "Read File with Direct IO" as UC15
         usecase "Detect MIME Type" as UC16
         usecase "Send HTTP Response with sendfile()" as UC14
+        usecase "Use Memory Mapping for Large Files" as UC39 #lightblue
+        usecase "Optimize Buffer Alignment" as UC40 #lightblue
     }
 
     package "Connection Management" {
         usecase "Track Active Connections" as UC8
         usecase "Process Client Connection" as UC11
         usecase "Close Client Connection" as UC17
+        usecase "Handle Keep-Alive Connections" as UC41 #lightblue
+        usecase "Monitor Connection Statistics" as UC42 #lightgreen
     }
 
     package "Asynchronous Logging" {
         usecase "Log System Events" as UC9
         usecase "Buffer Log Messages" as UC20
         usecase "Flush Log Buffer to Disk" as UC21
+        usecase "Format Log Messages" as UC43 #lightyellow
+        usecase "Track IP-based Logging" as UC44 #lightyellow
     }
 
     package "Graceful Shutdown" {
         usecase "Initiate Server Shutdown" as UC10
         usecase "Handle System Signals" as UC25
         usecase "Perform Graceful Shutdown" as UC26
+        usecase "Clean Thread Pool Resources" as UC45 #lightgreen
+        usecase "Close Active Connections" as UC46 #lightblue
     }
 }
 
 ' Actor interactions
-Client1 --> UC4 : HTTP requests
-Client1 --> UC5 : GET requests
-Client2 --> UC4 : Asset requests
-Client2 --> UC18 : Static content
-Client3 --> UC4 : API calls
-Client3 --> UC19 : Dynamic content
-Admin --> UC1 : Configures
-Admin --> UC3 : Manages
-Admin --> UC10 : Controls
-Admin --> UC25 : Monitors
+Client1 --> UC4 : initiates
+Client1 --> UC5 : sends request
+Client2 --> UC4 : initiates
+Client2 --> UC18 : requests assets
+Client3 --> UC4 : initiates
+Client3 --> UC19 : requests API
+Admin --> UC1 : configures
+Admin --> UC3 : manages
+Admin --> UC10 : controls
+Admin --> UC25 : monitors
 
-' Core relationships
+' Direct triggers
+UC4 ..> UC11 : <<trigger>>
+UC13 ..> UC11 : <<trigger>>
+UC17 ..> UC9 : <<trigger>>
+UC25 ..> UC10 : <<trigger>>
+UC35 ..> UC17 : <<trigger>>
+UC27 ..> UC17 : <<trigger>>
+UC41 ..> UC42 : <<trigger>>
+UC20 ..> UC21 : <<trigger>>
+UC5 ..> UC9 : <<trigger>>
+UC11 ..> UC5 : <<trigger>>
+UC18 ..> UC7 : <<trigger>>
+UC19 ..> UC7 : <<trigger>>
+UC26 ..> UC46 : <<trigger>>
+UC31 ..> UC30 : <<trigger>>
+
+' May triggers
+UC5 ..> UC28 : <<may trigger>>
+UC5 ..> UC27 : <<may trigger>>
+UC5 ..> UC30 : <<may trigger>>
+UC7 ..> UC39 : <<may trigger>>
+UC8 ..> UC17 : <<may trigger>>
+UC11 ..> UC27 : <<may trigger>>
+UC15 ..> UC40 : <<may trigger>>
+UC18 ..> UC28 : <<may trigger>>
+UC19 ..> UC28 : <<may trigger>>
+UC35 ..> UC46 : <<may trigger>>
+UC37 ..> UC28 : <<may trigger>>
+UC38 ..> UC28 : <<may trigger>>
+UC30 ..> UC31 : <<may trigger>>
+UC13 ..> UC35 : <<may trigger>>
+UC12 ..> UC36 : <<may trigger>>
+
+' Include relationships
 UC1 ..> UC2 : <<include>>
 UC1 ..> UC22 : <<include>>
 UC1 ..> UC23 : <<include>>
 UC1 ..> UC24 : <<include>>
 UC1 ..> UC29 : <<include>>
+UC1 ..> UC32 : <<include>>
+UC1 ..> UC33 : <<include>>
+UC1 ..> UC34 : <<include>>
 
 UC3 ..> UC4 : <<include>>
 UC3 ..> UC12 : <<include>>
 UC3 ..> UC13 : <<include>>
-
-UC4 ..> UC11 : <<trigger>>
+UC3 ..> UC35 : <<include>>
+UC3 ..> UC36 : <<include>>
 
 UC5 ..> UC6 : <<include>>
-UC5 ..> UC8 : <<include>>
-UC5 ..> UC9 : <<include>>
-UC5 ..> UC27 : <<extend>>
-UC5 ..> UC28 : <<extend>>
-UC5 ..> UC30 : <<include>>
-
-UC6 ..> UC18 : <<include>>
-UC6 ..> UC19 : <<include>>
+UC5 ..> UC37 : <<include>>
+UC5 ..> UC38 : <<include>>
 
 UC7 ..> UC15 : <<include>>
 UC7 ..> UC16 : <<include>>
 UC7 ..> UC14 : <<include>>
-UC7 ..> UC31 : <<extend>>
+UC7 ..> UC40 : <<include>>
 
-UC8 ..> UC17 : <<extend>>
+UC8 ..> UC41 : <<include>>
+UC8 ..> UC42 : <<include>>
 
+UC9 ..> UC43 : <<include>>
+UC9 ..> UC44 : <<include>>
 UC9 ..> UC20 : <<include>>
-UC9 ..> UC21 : <<include>>
 
-UC10 ..> UC8 : <<include>>
-UC10 ..> UC17 : <<include>>
+UC10 ..> UC45 : <<include>>
+UC10 ..> UC46 : <<include>>
 UC10 ..> UC26 : <<include>>
 
-UC11 ..> UC5 : <<include>>
-
-UC13 ..> UC11 : <<manage>>
-
-UC17 ..> UC9 : <<trigger>>
-
-UC18 ..> UC7 : <<include>>
-UC19 ..> UC7 : <<include>>
-
-UC25 ..> UC10 : <<trigger>>
+' Extend relationships
+UC6 ..> UC18 : <<extend>>
+UC6 ..> UC19 : <<extend>>
+UC7 ..> UC31 : <<extend>>
+UC8 ..> UC17 : <<extend>>
+UC13 ..> UC8 : <<extend>>
+UC27 ..> UC5 : <<extend>>
+UC28 ..> UC5 : <<extend>>
 
 ' Technical notes
-note "Initializes all server components including socket\nconfiguration, thread pool, and cache system" as N1
-N1 .. UC1
+note "Dual-stack socket implementation with\nTCP_CORK, TCP_NODELAY, and keep-alive options" as N1
+note "Thread pool with CPU affinity and\noptimal worker count management" as N2
+note "LRU cache with shared mutex and\nsize-based eviction policy" as N3
+note "GZIP compression with MIME type filtering\nand client capability detection" as N4
+note "Lock-free logging with color formatting\nand IP tracking" as N5
+note "Epoll-based event handling with\nedge-triggered mode" as N6
+note "Sliding window rate limiting with\nIP-based tracking" as N7
+note "Optimized static file serving with\nsendfile() and direct I/O" as N8
 
-note "Manages concurrent connections using epoll\nand thread pool for optimal performance" as N2
-N2 .. UC3
-
-note "Implements rate limiting and GZIP compression\nwith configurable parameters" as N3
-N3 .. UC5
-
-note "Optimized static file serving with sendfile(),\ndirect IO, and MIME type detection" as N4
-N4 .. UC7
-
-note "Ensures thread-safe connection handling\nand proper resource management" as N5
-N5 .. UC8
-
-note "Implements lock-free asynchronous logging\nwith buffering and batch writes" as N6
-N6 .. UC9
-
-note "Ensures clean shutdown with proper\nresource cleanup and connection handling" as N7
-N7 .. UC10
-
-note "LRU cache implementation with configurable\nsize and expiration policies" as N8
-N8 .. UC30
+N1 .. UC22
+N2 .. UC32
+N3 .. UC29
+N4 .. UC28
+N5 .. UC9
+N6 .. UC13
+N7 .. UC27
+N8 .. UC7
 
 @enduml

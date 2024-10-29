@@ -51,26 +51,44 @@ package "Data Structures" {
     }
     note bottom of ConnectionInfo: Tracks individual client connection metrics\nand maintains connection-specific log buffers
 
-    class CacheEntry <<Structure>> {
-        + data: vector<char>
-        + mimeType: string
-        + lastModified: time_t
-        + lruIterator: list<string>::iterator
-        + CacheEntry()
-        + CacheEntry(const vector<char>&, const string&, time_t, list<string>::iterator)
-    }
+    class SocketSettings <<Structure>> {
+    + {static} const keepAlive: int = 1
+    + {static} const keepIdle: int = 60
+    + {static} const keepInterval: int = 10
+    + {static} const keepCount: int = 3
+}
+
+   class CacheEntry <<Structure>> {
+    + data: vector<char>
+    + mimeType: string
+    + lastModified: time_t
+    + lruIterator: list<string>::iterator
+    + CacheEntry()
+    + CacheEntry(const vector<char>&, const string&, time_t, list<string>::iterator)
+    + template<typename Vector> CacheEntry(const Vector&, const string&,\n time_t, list<string>::iterator)
+}
+
+    class LogMessage <<Structure>> {
+    + message: string
+    + level: string
+    + ip: string
+    + timestamp: chrono::system_clock::time_point
+    + LogMessage(const string&, const string&, const string&)
+}
+
 
     class CacheStats <<Structure>> {
-        + currentSize: size_t
-        + maxSize: size_t
-        + itemCount: size_t
-        + maxAge: chrono::seconds
-    }
+    + currentSize: size_t
+    + maxSize: size_t
+    + itemCount: size_t
+    + maxAge: chrono::seconds
+}
 }
 
 package "Core Components" {
     class Server <<Core>> {
         - socket: Socket
+        - ~Socket()
         - router: Router
         - pool: ThreadPool
         - connectionsMutex: mutex
@@ -99,44 +117,72 @@ package "Core Components" {
         + getSocketFd() const: int
         + {static} durationToString(const chrono::steady_clock::duration& duration): string
     }
+    note bottom of Socket: RAII wrapper for TCP socket operations\nwith dual-stack (IPv4/IPv6) support\nand connection management
 
     class Router <<Core>> {
-        - staticFolder: string
-        + Router(const string& staticFolder)
-        + route(const string& path, int client_socket,\n const string& clientIp, Middleware* middleware, Cache* cache): void
-        + getStaticFolder() const: string
-        - getMimeType(const string& path): string
-    }
+    - staticFolder: string
+    - {static} const TEXT_HTML: string
+    - {static} const TEXT_PLAIN: string
+    - {static} const IMAGE_JPEG: string
+    - {static} const htmlExts: set<string_view>
+    - {static} const jpegExts: set<string_view>
+    - {static} const validExts: set<string_view>
+    - {static} const mimeTypes: unordered_map<string_view, string_view>
+    - {static} const SIMPLE_404_RESPONSE: char*
+    - {static} const RESPONSE_404_HEADER: string
+    - {static} const CRLF: char*
+    - {static} cached404Content: string
+    - {static} flag404: once_flag
+    - {static} has404File: bool
+
+    + Router(const string& staticFolder)
+    + route(const string& path, int client_socket,\n const string& clientIp, Middleware* middleware,\n Cache* cache): void
+    + [[nodiscard]] getStaticFolder() const: string
+    - [[nodiscard]] getMimeType(const string& path): string
+}
+    note right of Router: Handles routing of HTTP requests\nto appropriate static files\nwith MIME type detection\nand 404 handling
 
     class ThreadPool <<Core>> {
-        - workers: vector<thread>
-        - tasks: queue<function<void()>>
-        - queueMutex: mutex
-        - condition: condition_variable
-        - stop_flag: atomic<bool>
-        + ThreadPool(size_t numThreads)
-        + template<typename F, typename... Args>\n enqueue(F&& f, Args&&... args): future<invoke_result_t<F, Args...>>
-        + stop(): void
-        + threadCount() const: size_t
-        - start(size_t numThreads): void
-    }
+    - workers: vector<thread>
+    - tasks: queue<function<void()>>
+    - taskMutex: mutable shared_mutex
+    - condition: condition_variable_any
+    - stop_flag: atomic<bool>
+    - active_threads: atomic<size_t>
+    
+    + ThreadPool(size_t numThreads)
+    + ~ThreadPool()
+    + ThreadPool(const ThreadPool&) = delete
+    + ThreadPool& operator=(const ThreadPool&) = delete
+    + template<typename F, typename... Args>\n enqueue(F&& f, Args&&... args): future<invoke_result_t<F, Args...>>
+    + stop(): void
+    + threadCount() const: size_t
+    + queueSize() const: size_t
+    
+    - setThreadAffinity(pthread_t thread, size_t thread_id): bool
+    - start(size_t numThreads): void
+}
+note top of ThreadPool: Thread pool with read-write lock support\nfor optimized task queue access\nand CPU affinity management
 
-    class Http <<Core>> {
-        - {static} BUFFER_SIZE: size_t
-        - {static} ALIGNMENT: size_t
-        - {static} SENDFILE_CHUNK: size_t
-        - {static} MAX_IOV: int
-        + {static} getRequestPath(const string& request): string
-        + {static} sendResponse(int client_socket, const string& filePath,\n const string& mimeType, int statusCode,\n const string& clientIp, bool isIndex,\n Middleware* middleware, Cache* cache): void
-        + {static} isAssetRequest(const string& path): bool
-        - {static} setupSocketOptions(int client_socket, int cork, const string& clientIp): bool
-        - {static} handleFileContent(FileGuard&, const string&, vector<char>&,\n size_t&, time_t&, const string&): bool
-        - {static} compressContent(Middleware*, const string&, size_t,\n vector<char>&, string&, bool, FileGuard&,\n pmr::monotonic_buffer_resource&): bool
-        - {static} generateHeaders(int, const string&, size_t, time_t, bool): string
-        - {static} sendWithWritev(int, const string&, const string&,\n const vector<char>&, bool, bool, const string&): size_t
-        - {static} sendLargeFile(int, FileGuard&, size_t, const string&): size_t
-        - {static} updateCache(Cache*, const string&, const string&,\n time_t, FileGuard&, size_t,\n pmr::monotonic_buffer_resource&): void
-    }
+   class Http <<Core>> {
+    - {static} const BUFFER_SIZE: size_t = 65536
+    - {static} const ALIGNMENT: size_t = 512
+    - {static} const SENDFILE_CHUNK: size_t = 1048576
+    - {static} const MAX_IOV: int = IOV_MAX
+
+    + {static} getRequestPath(const string& request): string
+    + {static} sendResponse(int client_socket, const string& content,\n const string& mimeType, int statusCode,\n const string& clientIp, bool isIndex = false,\n Middleware* middleware = nullptr, Cache* cache = nullptr): void
+    + {static} isAssetRequest(const string& path): bool
+
+    - {static} setupSocketOptions(int client_socket, int cork,\n const string& clientIp): bool
+    - {static} handleFileContent(FileGuard& fileGuard,\n const string& filePath, pmr::vector<char>& fileContent,\n size_t& fileSize, time_t& lastModified,\n const string& clientIp): bool
+    - {static} compressContent(Middleware* middleware,\n const string& mimeType, size_t fileSize,\n pmr::vector<char>& fileContent,\n pmr::string& compressedContent, bool cacheHit,\n FileGuard& fileGuard,\n pmr::monotonic_buffer_resource& pool): bool
+    - {static} generateHeaders(int statusCode,\n const string& mimeType, size_t fileSize,\n time_t lastModified, bool isCompressed): string
+    - {static} sendWithWritev(int client_socket,\n const string& headerStr,\n const pmr::string& compressedContent,\n const pmr::vector<char>& fileContent,\n bool isCompressed, bool cacheHit,\n const string& clientIp): size_t
+    - {static} sendLargeFile(int client_socket,\n FileGuard& fileGuard, size_t fileSize,\n const string& clientIp): size_t
+    - {static} updateCache(Cache* cache,\n const string& filePath, const string& mimeType,\n time_t lastModified, FileGuard& fileGuard,\n size_t fileSize,\n pmr::monotonic_buffer_resource& pool): void
+}
+    note right of Http: Handles HTTP request processing\nand response generation
 
     class Logger <<Core>> {
         - {static} instance: Logger*
@@ -149,6 +195,12 @@ package "Core Components" {
         - running: atomic<bool>
         - isWaitingForEvents: bool
         - lastEventWaitLog: chrono::steady_clock::time_point
+        - EVENT_WAIT_LOG_INTERVAL: chrono::seconds
+        + message: string
+        + level: string
+        + ip: string
+        + timestamp: chrono::system_clock::time_point
+        + LogMessage(const string&, const string&, const string&)
         + {static} getInstance(): Logger*
         + {static} destroyInstance(): void
         + log(const string& message, const string& level, const string& ip): void
@@ -159,7 +211,12 @@ package "Core Components" {
         - Logger()
         - processLogs(): void
         - writeLogMessage(const LogMessage& msg): void
+        - formatLogMessage(const LogMessage& msg): string
     }
+
+    note right of Logger: Thread-safe singleton logger\nwith colored terminal output,\nIP tracking, and message buffering\nfor asynchronous logging
+
+
 
     class EpollWrapper <<Core>> {
         - epoll_fd: int
@@ -172,6 +229,7 @@ package "Core Components" {
         + template<typename Iterator>\n batch_operation(Iterator begin, Iterator end,\n int op, uint32_t events = 0): size_t
         + is_monitored(int fd) const: bool
     }
+    note right of EpollWrapper: RAII wrapper for Linux epoll API\nwith move semantics and\noptimized inline operations
 }
 
 package "Utility Classes" {
@@ -180,6 +238,46 @@ package "Utility Classes" {
         + virtual ~Middleware() = default
     }
 
+     class SocketOptionGuard <<Utility>> {
+    - cork: int&
+    - client_socket: int
+    + SocketOptionGuard(int& c, int cs)
+    + ~SocketOptionGuard()
+}
+
+    class FileGuard <<Utility>> {
+    - fd: int
+    + FileGuard()
+    + explicit FileGuard(int f)
+    + ~FileGuard()
+    + get() const: int
+    + reset(int f = -1): void
+}
+
+    class MMapGuard <<Utility>> {
+    - addr: void*
+    - length: size_t
+    + MMapGuard(void* a, size_t l)
+    + ~MMapGuard()
+}
+
+    class TerminalUtils <<Utility>> {
+        - {static} COLORS: array<const char*, 9>
+        - {static} BOLD: const char*
+        - {static} CHECK_MARK: const char*
+        - {static} CROSS_MARK: const char*
+        - {static} INFO_MARK: const char* 
+        - {static} WARN_MARK: const char*
+        + {static} success(const string& msg): string
+        + {static} error(const string& msg): string
+        + {static} info(const string& msg): string
+        + {static} warning(const string& msg): string
+        + {static} highlight(const string& msg): string
+        + {static} step(int num, const string& msg): string
+    }
+    note right of TerminalUtils: Provides terminal output formatting\nwith colors and symbols
+
+
     class Cache <<Utility>> {
         - cache: unordered_map<string, CacheEntry>
         - lruList: list<string>
@@ -187,7 +285,8 @@ package "Utility Classes" {
         - maxSize: size_t
         - currentSize: size_t
         - maxAge: chrono::seconds
-        + Cache(size_t maxSizeMB, chrono::seconds maxAge)
+
+        + explicit Cache(size_t maxSizeMB, chrono::seconds maxAge)
         + template<typename Vector> get(const string& key, Vector& data,\n string& mimeType, time_t& lastModified): bool
         + template<typename Vector> set(const string& key, const Vector& data,\n const string& mimeType, time_t lastModified): void
         + clear(): void
@@ -200,6 +299,7 @@ package "Utility Classes" {
         + getStats() const: CacheStats
         - updateLRU(const string& key): void
     }
+    note right of Cache: Thread-safe LRU cache implementation\nwith size-based eviction,\nTTL support, and memory optimization\nusing shared mutex for concurrent access
 
     class RateLimiter <<Utility>> {
         - maxRequests: size_t
@@ -211,11 +311,14 @@ package "Utility Classes" {
     }
 
     class Compression <<Utility>> {
+        - {static} nonCompressibleTypes: unordered_set<string>
+        - {static} compressibleTypes: unordered_set<string>
+
         + {static} shouldCompress(const string& mimeType, size_t contentLength): bool
         + {static} clientAcceptsGzip(const string& request): bool
-        + process(const string& data) override: string
-        - compressData(const string& data): string
-    }
+        + [[nodiscard]] process(const string& data) override: string
+        - [[nodiscard]] compressData(const string& data): string
+    }   
 
     class Parser <<Utility>> {
         + {static} parseConfig(const string& configFilePath): Config
@@ -225,39 +328,53 @@ package "Utility Classes" {
 Server "1" *-- "1" Socket : manages >
 Server "1" *-- "1" Router : uses >
 Server "1" *-- "1" ThreadPool : delegates tasks to >
+Server "1" *-- "1" EpollWrapper : manages events with >
+Server "1" *-- "1" RateLimiter : limits requests with >
+Server "1" *-- "1" Cache : caches content with >
 Server "1" o-- "0..*" ConnectionInfo : tracks >
-Server "1" *-- "1" Cache : uses >
-Server "1" *-- "1" RateLimiter : uses >
-Server "1" *-- "1" EpollWrapper : uses >
 
-Config "1" *-- "1" RateLimitConfig
-Config "1" *-- "1" CacheConfig
+Config "1" *-- "1" RateLimitConfig : contains >
+Config "1" *-- "1" CacheConfig : contains >
+Parser ..> Config : creates >
+Server ..> Config : configured by >
 
-Cache "1" o-- "0..*" CacheEntry : contains >
+Cache "1" o-- "0..*" CacheEntry : stores >
 Cache ..> CacheStats : produces >
 
-Server ..> Config : configured by >
-Server ..> Http : uses >
-Parser ..> Config : creates >
-Server ..> Logger : logs through >
-Router ..> Logger : logs access >
+Http +-- SocketSettings : configures >
+Http +-- SocketOptionGuard : manages >
+Http +-- FileGuard : manages >
+Http +-- MMapGuard : manages >
+Server ..> Http : processes requests with >
 Router ..> Http : uses >
-Router ..> Middleware : uses >
-Router ..> Cache : uses >
 
-RateLimiter -up-|> Middleware : implements >
-Compression -up-|> Middleware : implements >
+Middleware <|-- RateLimiter : implements
+Middleware <|-- Compression : implements
+Router ..> Middleware : uses >
+
+Logger "1" *-- "0..*" LogMessage : contains >
+Logger ..> TerminalUtils : formats with >
+Server ..> Logger : logs through >
+Router ..> Logger : logs through >
+
+Router ..> Cache : uses >
+Router ..> Middleware : uses >
 
 Config -[hidden]down-> ConnectionInfo
 Socket -[hidden]right-> Router
+
+
+
 Http -[hidden]right-> Parser
 
 legend right
   |= Color |= Component Type |= Purpose |
   |<#LightGreen>| Configuration |Configuration structures|
   |<#LightBlue>| Core Components |Server functionality|
-  |<#LightGray>| Utility Classes |Helper functions|
+  |<#LightGray>| Utility Classes |Helper functions & formatting|
   |<#LightYellow>| Data Structures |Data management|
 endlegend
+
+@endumlnd
 
 @enduml

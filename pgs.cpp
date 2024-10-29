@@ -656,31 +656,41 @@ private:
 class ThreadPool
 {
 public:
+    // constructor: Initialize thread pool with specified number of threads
     explicit ThreadPool(size_t numThreads)
     {
         start(numThreads);
     }
 
+    // destructor: Ensure proper cleanup of all threads
     ~ThreadPool()
     {
         stop();
     }
 
+    // Disable copy operations to prevent resource duplication
     ThreadPool(const ThreadPool &) = delete;
     ThreadPool &operator=(const ThreadPool &) = delete;
 
+    // Template method to submit tasks to the thread pool
+    // F: Function type
+    // Args: Function arguments pack
+    // Returns: std::future containing the result of the task
     template <typename F, typename... Args>
     auto enqueue(F &&f, Args &&...args)
         -> std::future<typename std::invoke_result_t<F, Args...>>
     {
         using return_type = typename std::invoke_result_t<F, Args...>;
 
+        // Create a packaged task that will store the function and its arguments
         auto task = std::make_shared<std::packaged_task<return_type()>>(
             std::bind(std::forward<F>(f), std::forward<Args>(args)...));
 
+        // Get future from the task before potentially moving the task
         std::future<return_type> res = task->get_future();
         {
-            std::unique_lock<std::mutex> lock(queueMutex);
+            // Need exclusive lock for writing to task queue
+            std::unique_lock<std::shared_mutex> lock(taskMutex);
             if (stop_flag)
             {
                 throw std::runtime_error("Cannot enqueue on stopped ThreadPool");
@@ -692,10 +702,11 @@ public:
         return res;
     }
 
+    // Gracefully stop the thread pool
     void stop()
     {
         {
-            std::unique_lock<std::mutex> lock(queueMutex);
+            std::unique_lock<std::shared_mutex> lock(taskMutex);
             stop_flag = true;
         }
         condition.notify_all();
@@ -713,39 +724,41 @@ public:
         std::swap(tasks, empty);
     }
 
+    // Get the number of threads in the pool
     [[nodiscard]]
     size_t threadCount() const
     {
         return workers.size();
     }
 
+    // Get the current size of the task queue
     [[nodiscard]]
     size_t queueSize() const
     {
-        std::unique_lock<std::mutex> lock(queueMutex);
+        // Only need shared lock for reading queue size
+        std::shared_lock<std::shared_mutex> lock(taskMutex);
         return tasks.size();
     }
 
 private:
-    std::vector<std::thread> workers;
-    std::queue<std::function<void()>> tasks;
-    mutable std::mutex queueMutex;
-    std::condition_variable condition;
-    std::atomic<bool> stop_flag{false};
-    std::atomic<size_t> active_threads{0};
+    std::vector<std::thread> workers;        // Container for worker threads
+    std::queue<std::function<void()>> tasks; // Task queue
+    mutable std::shared_mutex taskMutex;     // Read-write lock for protecting task queue
+    std::condition_variable_any condition;   // Condition variable that works with shared_mutex
+    std::atomic<bool> stop_flag{false};      // Flag to signal thread pool shutdown
+    std::atomic<size_t> active_threads{0};   // Counter for currently active threads
 
+    // Set CPU affinity for a thread
     bool setThreadAffinity(pthread_t thread, size_t thread_id)
     {
         const int num_cores = std::thread::hardware_concurrency();
         if (num_cores == 0)
             return false;
 
-        // CPU affinity mask
         cpu_set_t cpuset;
         CPU_ZERO(&cpuset);
 
-        // flexible core assignment (allow run on several neighboring cores)
-        const int cores_per_thread = std::max(1, num_cores / 4); // available cores per thread
+        const int cores_per_thread = std::max(1, num_cores / 4);
         const int base_core = (thread_id * cores_per_thread) % num_cores;
 
         for (int i = 0; i < cores_per_thread; ++i)
@@ -763,6 +776,7 @@ private:
         return true;
     }
 
+    // Initialize and start the thread pool
     void start(size_t numThreads)
     {
         const int num_cores = std::thread::hardware_concurrency();
@@ -772,18 +786,15 @@ private:
         {
             workers.emplace_back([this, i]
                                  {
-                                    // set thread name for easier debugging
                 pthread_setname_np(pthread_self(), ("worker-" + std::to_string(i)).c_str());
-                
-                //set thread affinity to CPU cores
                 setThreadAffinity(pthread_self(), i);
 
                 while (true) {
                     std::function<void()> task;
                     {
-                        std::unique_lock<std::mutex> lock(queueMutex);
+                        // Use shared lock initially for reading
+                        std::shared_lock<std::shared_mutex> lock(taskMutex);
                         
-                        //wait with timeout avoids permanently blocking threads
                         auto waitResult = condition.wait_for(lock, 
                             std::chrono::milliseconds(100), 
                             [this] { return stop_flag || !tasks.empty(); }
@@ -794,10 +805,15 @@ private:
                         }
 
                         if (!tasks.empty()) {
-                            task = std::move(tasks.front());
-                            tasks.pop();
+                            // Upgrade to unique lock for task extraction
+                            lock.unlock();
+                            std::unique_lock<std::shared_mutex> uniqueLock(taskMutex);
+                            if (!tasks.empty()) {  // Check again after acquiring unique lock
+                                task = std::move(tasks.front());
+                                tasks.pop();
+                            }
                         } else if (!waitResult) {
-                            continue;  // timeout occurred, re-check condition and retry
+                            continue;
                         }
                     }
 
@@ -822,7 +838,6 @@ private:
             " threads" + (num_cores > 0 ? " across " + std::to_string(num_cores) + " CPU cores" : " (CPU core count unknown)"));
     }
 };
-;
 
 class Socket
 {
@@ -850,20 +865,64 @@ private:
 
 Socket::Socket(int port) : port(port)
 {
-    // Create a dual-stack socket
-    server_fd = socket(AF_INET6, SOCK_STREAM, 0);
-    if (server_fd == -1)
+    // Create a dual-stack socket that supports both IPv6 and IPv4
+    if ((server_fd = socket(AF_INET6, SOCK_STREAM, 0)) == -1)
     {
         Logger::getInstance()->error("Socket creation failed: " + std::string(strerror(errno)));
         throw std::runtime_error("Socket creation failed!");
     }
 
-    int no = 0;
-    if (setsockopt(server_fd, IPPROTO_IPV6, IPV6_V6ONLY, &no, sizeof(no)) < 0)
+    try
     {
-        Logger::getInstance()->error("Failed to set IPV6_V6ONLY to 0: " + std::string(strerror(errno)));
+        // Lambda for handling setsockopt calls
+        auto setSocketOption = [this](int level, int optname, const void *optval, socklen_t optlen, const char *errorMsg)
+        {
+            if (setsockopt(server_fd, level, optname, optval, optlen) < 0)
+            {
+                throw std::runtime_error(std::string(errorMsg) + ": " + std::string(strerror(errno)));
+            }
+        };
+
+        // Allow IPv4 connections on IPv6 socket (disable IPV6_V6ONLY)
+        int no = 0;
+        setSocketOption(IPPROTO_IPV6, IPV6_V6ONLY, &no, sizeof(no),
+                        "Failed to set IPV6_V6ONLY");
+
+        // Enable address and port reuse
+        int opt = 1;
+        setSocketOption(SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt),
+                        "Failed to set SO_REUSEADDR | SO_REUSEPORT");
+
+        // Set send/receive buffer sizes for better performance
+        int bufSize = 1024 * 1024; // 1MB buffer (i don't know if this is a good size and should i make it as a configurable parameter ?)
+        setSocketOption(SOL_SOCKET, SO_RCVBUF, &bufSize, sizeof(bufSize),
+                        "Failed to set SO_RCVBUF");
+        setSocketOption(SOL_SOCKET, SO_SNDBUF, &bufSize, sizeof(bufSize),
+                        "Failed to set SO_SNDBUF");
+
+        // Set non-blocking mode for epoll
+        int flags = fcntl(server_fd, F_GETFL, 0);
+        if (flags == -1)
+        {
+            throw std::runtime_error("Failed to get socket flags: " + std::string(strerror(errno)));
+        }
+        if (fcntl(server_fd, F_SETFL, flags | O_NONBLOCK) < 0)
+        {
+            throw std::runtime_error("Failed to set non-blocking mode: " + std::string(strerror(errno)));
+        }
+
+        // Note: We don't set the following here because they are managed elsewhere:
+        // - TCP_CORK: Managed by SocketOptionGuard in Http::sendResponse
+        // - SO_KEEPALIVE and related: Set in Http::setupSocketOptions for each client
+        // - TCP_NODELAY: Not used as we're using TCP_CORK for static file serving
+
+        Logger::getInstance()->success("Socket created and configured successfully");
+    }
+    catch (const std::exception &e)
+    {
+        Logger::getInstance()->error("Socket configuration failed: " + std::string(e.what()));
         close(server_fd);
-        throw std::runtime_error("Failed to configure dual-stack socket!");
+        throw;
     }
 }
 
@@ -875,13 +934,6 @@ Socket::~Socket()
 
 void Socket::bind()
 {
-    int opt = 1;
-    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt)) < 0) // Set socket options
-    {
-        Logger::getInstance()->error("Failed to set socket options: " + std::string(strerror(errno)));
-        throw std::runtime_error("Failed to set socket options");
-    }
-
     struct sockaddr_in6 address;
     memset(&address, 0, sizeof(address));
     address.sin6_family = AF_INET6;  // Set address family to IPv6
@@ -1524,8 +1576,8 @@ size_t Http::sendWithWritev(int client_socket,
         {
             if (errno == EAGAIN || errno == EWOULDBLOCK)
             {
-                std::this_thread::sleep_for(std::chrono::microseconds(1000));
-                continue;
+                std::this_thread::sleep_for(std::chrono::microseconds(1000)); // 1ms sleep
+                continue;                                                     // retry
             }
             Logger::getInstance()->error(
                 "Failed to send response: errno=" + std::to_string(errno),
@@ -1572,8 +1624,8 @@ size_t Http::sendLargeFile(int client_socket,
         {
             if (errno == EAGAIN || errno == EWOULDBLOCK)
             {
-                std::this_thread::sleep_for(std::chrono::microseconds(1000));
-                continue;
+                std::this_thread::sleep_for(std::chrono::microseconds(1000)); // 1ms sleep
+                continue;                                                     // retry
             }
             else if (errno == EINVAL || errno == ENOSYS)
             {
@@ -1632,8 +1684,8 @@ size_t Http::sendLargeFile(int client_socket,
             {
                 if (errno == EAGAIN || errno == EWOULDBLOCK)
                 {
-                    std::this_thread::sleep_for(std::chrono::microseconds(1000));
-                    continue;
+                    std::this_thread::sleep_for(std::chrono::microseconds(1000)); // 1ms sleep
+                    continue;                                                     // retry
                 }
                 Logger::getInstance()->error(
                     "Failed to send mmap data: errno=" + std::to_string(errno),
@@ -2183,8 +2235,13 @@ void Server::start()
     try
     {
         // pre-allocate events array with optimal size
-        static constexpr size_t MAX_EVENTS = 32;
+        static constexpr size_t MAX_EVENTS = 1024; // again i don't know should i make it as a config or not
         struct epoll_event events[MAX_EVENTS];
+
+        // Efficient timeout tracking with pre-allocated vector
+        std::vector<std::chrono::steady_clock::time_point> lastActivityTimes(1024);
+        static constexpr auto IDLE_TIMEOUT = std::chrono::seconds(30);
+        auto lastTimeoutCheck = std::chrono::steady_clock::now();
 
         // add server socket to epoll
         epoll.add(socket.getSocketFd(), EPOLLIN);
@@ -2193,7 +2250,34 @@ void Server::start()
         while (!shouldStop)
         {
             // use shorter timeout for better responsiveness
-            int nfds = epoll.wait(events, MAX_EVENTS, 50);
+            int nfds = epoll.wait(events, MAX_EVENTS, 100); //(another parameter i don't know should i make it as a config or not)
+
+            // Only check timeouts when system load is not high
+            auto now = std::chrono::steady_clock::now();
+            if (static_cast<size_t>(nfds) < MAX_EVENTS && now - lastTimeoutCheck > std::chrono::seconds(30))
+            {
+                std::vector<int> timeoutSockets;
+                timeoutSockets.reserve(32);
+
+                {
+                    std::lock_guard<std::mutex> lock(connectionsMutex);
+                    for (const auto &[fd, info] : connections)
+                    {
+                        if (static_cast<size_t>(fd) < lastActivityTimes.size() &&
+                            now - lastActivityTimes[fd] > IDLE_TIMEOUT)
+                        {
+                            timeoutSockets.push_back(fd);
+                        }
+                    }
+                }
+
+                for (int fd : timeoutSockets)
+                {
+                    closeConnection(fd);
+                }
+
+                lastTimeoutCheck = now;
+            }
 
             if (nfds == -1)
             {
@@ -2219,12 +2303,21 @@ void Server::start()
                         connections.emplace(
                             client_socket,
                             ConnectionInfo{
-                                std::chrono::steady_clock::now(),
+                                now, // reuse timestamp
                                 clientIp,
                                 false,
                                 false,
                                 0,
-                                0}); // add connection info
+                                0});
+
+                        if (static_cast<size_t>(client_socket) < lastActivityTimes.size())
+                        {
+                            lastActivityTimes[client_socket] = now;
+                        }
+                        else
+                        {
+                            lastActivityTimes.resize(client_socket + 1024, now);
+                        }
                     }
 
                     try
@@ -2252,6 +2345,10 @@ void Server::start()
                         if (it != connections.end())
                         {
                             clientIp = it->second.ip;
+                            if (static_cast<size_t>(client_socket) < lastActivityTimes.size())
+                            {
+                                lastActivityTimes[client_socket] = now;
+                            }
                         }
                     }
 
