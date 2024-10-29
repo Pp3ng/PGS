@@ -20,6 +20,8 @@
 #include <deque>              // double-ended queue
 #include <list>               // doubly linked list for cache implementation
 #include <thread>             // multithreading support
+#include <pthread.h>          // POSIX threads
+#include <sched.h>            // CPU affinity
 #include <vector>             // dynamic array
 #include <algorithm>          // applying transformations
 #include <queue>              // queue data structure
@@ -656,7 +658,7 @@ class ThreadPool
 public:
     explicit ThreadPool(size_t numThreads)
     {
-        start(numThreads); // initialize thread pool with specified number of threads
+        start(numThreads);
     }
 
     ~ThreadPool()
@@ -664,50 +666,40 @@ public:
         stop();
     }
 
-    // delete copy constructor and assignment operator to prevent multiple instances sharing resources
     ThreadPool(const ThreadPool &) = delete;
     ThreadPool &operator=(const ThreadPool &) = delete;
 
-    // template method to enqueue tasks and get future results
     template <typename F, typename... Args>
     auto enqueue(F &&f, Args &&...args)
         -> std::future<typename std::invoke_result_t<F, Args...>>
     {
         using return_type = typename std::invoke_result_t<F, Args...>;
 
-        // create a packaged task that will store result
         auto task = std::make_shared<std::packaged_task<return_type()>>(
             std::bind(std::forward<F>(f), std::forward<Args>(args)...));
 
         std::future<return_type> res = task->get_future();
-
         {
             std::unique_lock<std::mutex> lock(queueMutex);
             if (stop_flag)
             {
                 throw std::runtime_error("Cannot enqueue on stopped ThreadPool");
             }
-
-            // wrap packaged task in a void function for queue
             tasks.emplace([task]()
                           { (*task)(); });
         }
-
-        condition.notify_one(); // notify one thread that a task is available
+        condition.notify_one();
         return res;
     }
 
-    // stop thread pool and wait for all tasks to complete
     void stop()
     {
         {
             std::unique_lock<std::mutex> lock(queueMutex);
             stop_flag = true;
         }
-
         condition.notify_all();
 
-        // join all worker threads
         for (std::thread &worker : workers)
         {
             if (worker.joinable())
@@ -717,61 +709,120 @@ public:
         }
 
         workers.clear();
-
-        // clear any remaining tasks
         std::queue<std::function<void()>> empty;
         std::swap(tasks, empty);
     }
 
-    // get number of worker threads
+    [[nodiscard]]
     size_t threadCount() const
     {
         return workers.size();
     }
 
+    [[nodiscard]]
+    size_t queueSize() const
+    {
+        std::unique_lock<std::mutex> lock(queueMutex);
+        return tasks.size();
+    }
+
 private:
     std::vector<std::thread> workers;
     std::queue<std::function<void()>> tasks;
-    std::mutex queueMutex;
+    mutable std::mutex queueMutex;
     std::condition_variable condition;
     std::atomic<bool> stop_flag{false};
+    std::atomic<size_t> active_threads{0};
 
-    // initialize thread pool with specified number of threads
+    bool setThreadAffinity(pthread_t thread, size_t thread_id)
+    {
+        const int num_cores = std::thread::hardware_concurrency();
+        if (num_cores == 0)
+            return false;
+
+        // CPU affinity mask
+        cpu_set_t cpuset;
+        CPU_ZERO(&cpuset);
+
+        // flexible core assignment (allow run on several neighboring cores)
+        const int cores_per_thread = std::max(1, num_cores / 4); // available cores per thread
+        const int base_core = (thread_id * cores_per_thread) % num_cores;
+
+        for (int i = 0; i < cores_per_thread; ++i)
+        {
+            CPU_SET((base_core + i) % num_cores, &cpuset);
+        }
+
+        int rc = pthread_setaffinity_np(thread, sizeof(cpu_set_t), &cpuset);
+        if (rc != 0)
+        {
+            Logger::getInstance()->warning(
+                "Thread affinity setting failed: " + std::string(strerror(rc)));
+            return false;
+        }
+        return true;
+    }
+
     void start(size_t numThreads)
     {
-        workers.reserve(numThreads); // prevent vector reallocation
+        const int num_cores = std::thread::hardware_concurrency();
+        workers.reserve(numThreads);
 
         for (size_t i = 0; i < numThreads; ++i)
         {
-            workers.emplace_back([this]
+            workers.emplace_back([this, i]
                                  {
-                while (true) {
-                    std::function<void()> task;// define a task to execute
+                                    // set thread name for easier debugging
+                pthread_setname_np(pthread_self(), ("worker-" + std::to_string(i)).c_str());
+                
+                //set thread affinity to CPU cores
+                setThreadAffinity(pthread_self(), i);
 
+                while (true) {
+                    std::function<void()> task;
                     {
                         std::unique_lock<std::mutex> lock(queueMutex);
+                        
+                        //wait with timeout avoids permanently blocking threads
+                        auto waitResult = condition.wait_for(lock, 
+                            std::chrono::milliseconds(100), 
+                            [this] { return stop_flag || !tasks.empty(); }
+                        );
 
-                        condition.wait(lock, [this] {
-                            return stop_flag || !tasks.empty();// wait for a task or stop flag
-                        });
-
-                        if (stop_flag && tasks.empty()) {// check if thread pool is stopped
+                        if (stop_flag && tasks.empty()) {
                             return;
                         }
 
                         if (!tasks.empty()) {
-                            task = std::move(tasks.front());// get next task
+                            task = std::move(tasks.front());
                             tasks.pop();
+                        } else if (!waitResult) {
+                            continue;  // timeout occurred, re-check condition and retry
                         }
                     }
 
                     if (task) {
-                        task();// execute task
+                        active_threads++;
+                        try {
+                            task();
+                        } catch (const std::exception& e) {
+                            Logger::getInstance()->error(
+                                "Thread pool task exception: " + std::string(e.what())
+                            );
+                        } catch (...) {
+                            Logger::getInstance()->error("Unknown exception in thread pool task");
+                        }
+                        active_threads--;
                     }
                 } });
         }
+
+        Logger::getInstance()->success(
+            "Thread pool initialized with " + std::to_string(numThreads) +
+            " threads" + (num_cores > 0 ? " across " + std::to_string(num_cores) + " CPU cores" : " (CPU core count unknown)"));
     }
 };
+;
 
 class Socket
 {
