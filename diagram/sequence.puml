@@ -1,0 +1,196 @@
+@startuml server-sequence
+
+skinparam responseMessageBelowArrow true
+skinparam maxMessageSize 150
+skinparam ParticipantPadding 40
+skinparam BoxPadding 20
+
+box "Client Side" #LightYellow
+participant "Client" as client
+end box
+
+box "Server Core Components" #LightBlue
+participant "Main" as main
+participant "Server" as server
+participant "Logger" as logger
+participant "Socket" as socket
+participant "EpollWrapper" as epoll
+participant "ThreadPool" as pool
+participant "Router" as router
+participant "Http" as http
+participant "Cache" as cache
+participant "RateLimiter" as limiter
+participant "Compression" as compression
+end box
+
+== Server Initialization ==
+[-> main: main()
+activate main
+
+main -> logger: getInstance()
+activate logger
+logger --> main: logger instance
+deactivate logger
+
+main -> Parser: parseConfig("pgs_conf.json")
+activate Parser
+Parser -> logger: info("Reading configuration")
+Parser -> Parser: validate configuration
+Parser -> logger: success("Configuration loaded")
+Parser --> main: Config object
+deactivate Parser
+
+main -> server: new Server(config)
+activate server
+
+server -> socket: new Socket(port)
+activate socket
+socket -> logger: info("Creating socket")
+socket -> socket: socket(AF_INET6, SOCK_STREAM, 0)
+socket -> socket: setSocketOptions()
+socket -> logger: success("Socket configured")
+socket --> server: socket ready
+deactivate socket
+
+server -> epoll: new EpollWrapper()
+activate epoll
+epoll -> epoll: epoll_create1(EPOLL_CLOEXEC)
+epoll -> epoll: add(socket_fd, EPOLLIN | EPOLLET)
+epoll --> server: epoll instance
+deactivate epoll
+
+server -> pool: new ThreadPool(threadCount)
+activate pool
+pool -> logger: info("Initializing thread pool")
+pool -> pool: start(numThreads)
+pool -> pool: setThreadAffinity()
+pool -> logger: success("Thread pool initialized")
+pool --> server: thread pool ready
+deactivate pool
+
+server -> cache: new Cache(sizeMB, maxAge)
+server -> limiter: new RateLimiter(maxRequests, timeWindow)
+server -> router: new Router(staticFolder)
+server -> logger: success("Server initialized")
+server --> main: server ready
+
+== Connection Handling Loop ==
+main -> server: start()
+activate server
+
+loop until shouldStop
+    client -> socket: connection request
+    socket -> epoll: event notification
+    epoll -> server: new connection event
+    
+    server -> socket: acceptConnection()
+    activate socket
+    socket -> logger: info("New connection")
+    socket --> server: client_socket, clientIp
+    deactivate socket
+    
+    server -> pool: enqueue(handleClient)
+    activate pool
+    
+    pool -> server: handleClient(client_socket, clientIp)
+    activate server
+    
+    server -> server: readClientData()
+    alt valid request received
+        server -> Http: getRequestPath(request)
+        activate http
+        http --> server: path
+        deactivate http
+        
+        server -> limiter: process(request)
+        activate limiter
+        
+        alt not rate limited
+            limiter --> server: processed request
+            deactivate limiter
+            
+            server -> compression: new Compression()
+            server -> router: route(path, client_socket, clientIp, compression, cache)
+            activate router
+            
+            router -> Http: isAssetRequest(path)
+            router -> cache: get(path)
+            activate cache
+            
+            alt cache hit
+                cache --> router: cached content
+                router -> logger: info("Cache hit")
+                deactivate cache
+                
+                router -> Http: sendResponse(cached)
+                activate http
+                http -> compression: shouldCompress()
+                alt should compress
+                    http -> compression: process()
+                end
+                http -> client: send response
+                http --> router: response sent
+                deactivate http
+                
+            else cache miss
+                cache --> router: cache miss
+                router -> logger: info("Cache miss")
+                
+                router -> Http: sendResponse(file)
+                activate http
+                http -> compression: shouldCompress()
+                alt should compress
+                    http -> compression: process()
+                end
+                http -> http: sendHeaders()
+                http -> http: sendContent()
+                http -> cache: set(path, content)
+                http -> client: send response
+                http --> router: response sent
+                deactivate http
+            end
+            
+            router -> logger: info("Request completed")
+            router --> server: routing complete
+            deactivate router
+            
+        else rate limited
+            limiter --> server: 429 response
+            server -> logger: warning("Rate limited")
+            server -> client: send rate limit response
+        end
+        
+    else invalid request
+        server -> logger: error("Invalid request")
+    end
+    
+    server -> server: closeConnection()
+    deactivate server
+    deactivate pool
+end
+
+== Server Shutdown ==
+[-> main: signal(SIGINT/SIGTERM)
+main -> server: stop()
+
+server -> socket: closeSocket()
+server -> pool: stop()
+activate pool
+pool -> pool: joinWorkers()
+pool --> server: workers stopped
+deactivate pool
+
+server -> epoll: cleanup()
+server -> logger: info("Server shutting down")
+server --> main: server stopped
+
+main -> logger: destroyInstance()
+activate logger
+logger --> main: logger destroyed
+deactivate logger
+
+[<-- main: exit
+deactivate server
+deactivate main
+
+@enduml

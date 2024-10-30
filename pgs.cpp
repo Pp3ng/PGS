@@ -1,48 +1,48 @@
-#include <iostream>           // std::cout, std::cerr - for console output
-#include <cstring>            // strlen() - for string manipulation
-#include <sys/socket.h>       // socket(), bind(), listen(), accept() - for socket operations
-#include <sys/sendfile.h>     // sendfile - for efficient file sending
-#include <sys/stat.h>         // fstat - to get file status
-#include <sys/uio.h>          // writev - to write to multiple buffers
-#include <sys/mman.h>         // mmap - for memory-mapped file access
-#include <arpa/inet.h>        // inet_ntoa - for converting IP addresses
-#include <netinet/tcp.h>      // TCP_KEEPIDLE, TCP_KEEPINTVL, TCP_KEEPCNT - TCP connection keepalive options
-#include <netinet/in.h>       // sockaddr_in - structure for IPv4 addresses
-#include <unistd.h>           // close() function - to close file descriptors
-#include <sys/epoll.h>        // epoll - for scalable I/O event notification
-#include <fstream>            // file reading operations
-#include <sstream>            // string stream manipulations
-#include <filesystem>         // filesystem operations
-#include <ctime>              // handling timestamps
-#include <fcntl.h>            // file control options
-#include <map>                // ordered associative container (Red-Black Tree)
-#include <set>                // ordered unique elements (Red-Black Tree)
-#include <deque>              // double-ended queue
-#include <list>               // doubly linked list for cache implementation
-#include <thread>             // multithreading support
-#include <pthread.h>          // POSIX threads
-#include <sched.h>            // CPU affinity
-#include <vector>             // dynamic array
 #include <algorithm>          // applying transformations
-#include <queue>              // queue data structure
-#include <mutex>              // thread synchronization
-#include <condition_variable> // blocking thread synchronization
-#include <functional>         // function objects
-#include <unordered_map>      // unordered associative container (Hash Table)
-#include <unordered_set>      // unordered unique elements (Hash Table)
+#include <arpa/inet.h>        // inet_ntoa - for converting IP addresses
+#include <array>              // fixed-size arrays
+#include <atomic>             // atomic operations
 #include <chrono>             // measuring time
-#include <shared_mutex>       // shared mutexes
+#include <condition_variable> // blocking thread synchronization
+#include <csignal>            // signal handling
+#include <cstring>            // strlen() - for string manipulation
+#include <ctime>              // handling timestamps
+#include <deque>              // double-ended queue
+#include <fcntl.h>            // file control options
+#include <filesystem>         // filesystem operations
+#include <fstream>            // file reading operations
+#include <functional>         // function objects
+#include <future>             // asynchronous tasks
+#include <iostream>           // std::cout, std::cerr - for console output
+#include <list>               // doubly linked list for cache implementation
+#include <map>                // ordered associative container (Red-Black Tree)
 #include <memory>             // smart pointers
 #include <memory_resource>    // memory resource management
-#include <array>              // fixed-size arrays
-#include <string_view>        // efficient string handling without ownership
+#include <mutex>              // thread synchronization
+#include <netinet/in.h>       // sockaddr_in - structure for IPv4 addresses
+#include <netinet/tcp.h>      // TCP_KEEPIDLE, TCP_KEEPINTVL, TCP_KEEPCNT - TCP connection keepalive options
 #include <new>                // memory alignment
-#include <future>             // asynchronous tasks
-#include <csignal>            // signal handling
-#include <atomic>             // atomic operations
-#include <zlib.h>             // zlib compression
-#include <stdexcept>          // standard exceptions like std::runtime_error
 #include <nlohmann/json.hpp>  // JSON parsing
+#include <pthread.h>          // POSIX threads
+#include <queue>              // queue data structure
+#include <sched.h>            // CPU affinity
+#include <set>                // ordered unique elements (Red-Black Tree)
+#include <shared_mutex>       // shared mutexes
+#include <sstream>            // string stream manipulations
+#include <stdexcept>          // standard exceptions like std::runtime_error
+#include <string_view>        // efficient string handling without ownership
+#include <sys/epoll.h>        // epoll - for scalable I/O event notification
+#include <sys/mman.h>         // mmap - for memory-mapped file access
+#include <sys/sendfile.h>     // sendfile - for efficient file sending
+#include <sys/socket.h>       // socket(), bind(), listen(), accept() - for socket operations
+#include <sys/stat.h>         // fstat - to get file status
+#include <sys/uio.h>          // writev - to write to multiple buffers
+#include <thread>             // multithreading support
+#include <unistd.h>           // close() function - to close file descriptors
+#include <unordered_map>      // unordered associative container (Hash Table)
+#include <unordered_set>      // unordered unique elements (Hash Table)
+#include <vector>             // dynamic array
+#include <zlib.h>             // zlib compression
 
 #include "terminal_utils.h"
 
@@ -78,10 +78,8 @@ struct ConnectionInfo
     std::vector<std::string> logBuffer;              // buffer for storing logs
 
     ConnectionInfo(const std::chrono::steady_clock::time_point &time,
-                   const std::string &ipAddr,
-                   bool logged = false,
-                   bool closureLogged = false,
-                   uint64_t received = 0,
+                   const std::string &ipAddr, bool logged = false,
+                   bool closureLogged = false, uint64_t received = 0,
                    uint64_t sent = 0)
         : startTime(time), ip(ipAddr), isLogged(logged),
           isClosureLogged(closureLogged), bytesReceived(received),
@@ -94,9 +92,11 @@ private:
     std::mutex logMutex;   // mutex to protect log file access
     std::ofstream logFile; // log file stream
     static Logger *instance;
-    bool isWaitingForEvents;                                                 // new flag to track event waiting state
-    std::chrono::steady_clock::time_point lastEventWaitLog;                  // track last event wait log time
-    static constexpr auto EVENT_WAIT_LOG_INTERVAL = std::chrono::seconds(5); // log interval for waiting events
+    bool isWaitingForEvents; // new flag to track event waiting state
+    std::chrono::steady_clock::time_point
+        lastEventWaitLog; // track last event wait log time
+    static constexpr auto EVENT_WAIT_LOG_INTERVAL =
+        std::chrono::seconds(5); // log interval for waiting events
 
     // structure to hold log message data
     struct LogMessage
@@ -106,7 +106,8 @@ private:
         std::string ip;                                  // iP address associated with log
         std::chrono::system_clock::time_point timestamp; // when log was created
 
-        LogMessage(const std::string &msg, const std::string &lvl, const std::string &clientIp)
+        LogMessage(const std::string &msg, const std::string &lvl,
+                   const std::string &clientIp)
             : message(msg), level(lvl), ip(clientIp),
               timestamp(std::chrono::system_clock::now()) {}
     };
@@ -114,9 +115,10 @@ private:
     // async logging members
     std::queue<LogMessage> messageQueue; // queue to store pending log messages
     std::mutex queueMutex;               // mutex to protect message queue
-    std::condition_variable queueCV;     // condition variable for queue synchronization
-    std::thread loggerThread;            // background thread for processing logs
-    std::atomic<bool> running{true};     // flag to control background thread
+    std::condition_variable
+        queueCV;                     // condition variable for queue synchronization
+    std::thread loggerThread;        // background thread for processing logs
+    std::atomic<bool> running{true}; // flag to control background thread
 
     Logger() : isWaitingForEvents(false)
     {
@@ -161,29 +163,42 @@ private:
         }
     }
 
+    // compile-time string hash function
+    [[nodiscard]]
+    static constexpr unsigned int hashString(std::string_view str)
+    {
+        unsigned int hash = 5381;
+        for (char c : str)
+        {
+            hash = ((hash << 5) + hash) + c;
+        }
+        return hash;
+    }
+
     // format and write a single log message
     void writeLogMessage(const LogMessage &msg)
     {
         std::string logMessage = formatLogMessage(msg);
-
         logFile << logMessage << std::endl;
 
-        // Output to console with appropriate color
-        if (msg.level == "ERROR")
+        // Use string_view for string comparison to avoid copies
+        std::string_view level(msg.level);
+
+        // Use switch with string hash for compile-time optimization
+        switch (hashString(level))
         {
+        case hashString("ERROR"):
             std::cout << TerminalUtils::error(logMessage) << std::endl;
-        }
-        else if (msg.level == "WARNING")
-        {
+            break;
+        case hashString("WARNING"):
             std::cout << TerminalUtils::warning(logMessage) << std::endl;
-        }
-        else if (msg.level == "SUCCESS")
-        {
+            break;
+        case hashString("SUCCESS"):
             std::cout << TerminalUtils::success(logMessage) << std::endl;
-        }
-        else
-        {
+            break;
+        default:
             std::cout << TerminalUtils::info(logMessage) << std::endl;
+            break;
         }
     }
 
@@ -200,8 +215,8 @@ private:
         std::strftime(timestamp, sizeof(timestamp), "[%Y-%m-%d %H:%M:%S]",
                       std::localtime(&time)); // format timestamp
 
-        return std::string(timestamp) + "." + std::to_string(ms.count()) +
-               " [" + msg.level + "] [" + msg.ip + "] " + msg.message;
+        return std::string(timestamp) + "." + std::to_string(ms.count()) + " [" +
+               msg.level + "] [" + msg.ip + "] " + msg.message;
     }
 
 public:
@@ -239,7 +254,8 @@ public:
     }
 
     // main logging function
-    void log(const std::string &message, const std::string &level = "INFO", const std::string &ip = "-")
+    void log(const std::string &message, const std::string &level = "INFO",
+             const std::string &ip = "-")
     {
         // handle special case for "Waiting for events" messages
         if (message == "Waiting for events...")
@@ -248,14 +264,16 @@ public:
             auto now = std::chrono::steady_clock::now();
 
             if (!isWaitingForEvents ||
-                (now - lastEventWaitLog) >= EVENT_WAIT_LOG_INTERVAL) // check if interval has passed
+                (now - lastEventWaitLog) >=
+                    EVENT_WAIT_LOG_INTERVAL) // check if interval has passed
             {
                 isWaitingForEvents = true;
                 lastEventWaitLog = now;
             }
             else
             {
-                return; // skip logging if we're already waiting and interval hasn't passed
+                return; // skip logging if we're already waiting and interval hasn't
+                        // passed
             }
         }
         else
@@ -274,7 +292,7 @@ public:
     // convenience methods for different log levels
     void error(const std::string &message, const std::string &ip = "-")
     {
-        log(message, "ERROR", ip);
+        log(TerminalUtils::highlight(message), "ERROR", ip);
     }
 
     void warning(const std::string &message, const std::string &ip = "-")
@@ -284,7 +302,7 @@ public:
 
     void success(const std::string &message, const std::string &ip = "-")
     {
-        log(message, "SUCCESS", ip);
+        log(TerminalUtils::highlight(message), "SUCCESS", ip);
     }
 
     void info(const std::string &message, const std::string &ip = "-")
@@ -298,13 +316,15 @@ Logger *Logger::instance = nullptr; // initialize static singleton instance
 class Cache
 {
 private:
-    // Cache entry structure for storing file content and metadata - O(1) access time
+    // Cache entry structure for storing file content and metadata - O(1) access
+    // time
     struct CacheEntry
     {
-        std::vector<char> data;                       // actual content of cached file
-        std::string mimeType;                         // MIME type of cached content
-        time_t lastModified;                          // last modification time of file
-        std::list<std::string>::iterator lruIterator; // iterator pointing to key's position in LRU list
+        std::vector<char> data; // actual content of cached file
+        std::string mimeType;   // MIME type of cached content
+        time_t lastModified;    // last modification time of file
+        std::list<std::string>::iterator
+            lruIterator; // iterator pointing to key's position in LRU list
 
         CacheEntry() : lastModified(0) {}
 
@@ -317,15 +337,18 @@ private:
         template <typename Vector>
         CacheEntry(const Vector &d, const std::string &m, time_t lm,
                    std::list<std::string>::iterator it)
-            : data(d.begin(), d.end()), mimeType(m), lastModified(lm), lruIterator(it) {}
+            : data(d.begin(), d.end()), mimeType(m), lastModified(lm),
+              lruIterator(it) {}
     };
 
-    std::unordered_map<std::string, CacheEntry> cache; // main cache storage (key -> entry mapping)
-    std::list<std::string> lruList;                    // LRU order tracking list (most recent -> least recent)
-    mutable std::shared_mutex mutex;                   // mutex for thread-safe operations
-    size_t maxSize;                                    // maximum size of cache in bytes
-    size_t currentSize;                                // current size of cache in bytes
-    std::chrono::seconds maxAge;                       // maximum age of cache entries
+    std::unordered_map<std::string, CacheEntry>
+        cache; // main cache storage (key -> entry mapping)
+    std::list<std::string>
+        lruList;                     // LRU order tracking list (most recent -> least recent)
+    mutable std::shared_mutex mutex; // mutex for thread-safe operations
+    size_t maxSize;                  // maximum size of cache in bytes
+    size_t currentSize;              // current size of cache in bytes
+    std::chrono::seconds maxAge;     // maximum age of cache entries
 
     // helper function to update LRU order - O(1) operation
     void updateLRU(const std::string &key)
@@ -338,12 +361,12 @@ private:
 public:
     // constructor with overflow check - O(1)
     explicit Cache(size_t maxSizeMB, std::chrono::seconds maxAge)
-        : maxSize(static_cast<size_t>(maxSizeMB) * 1024 * 1024),
-          currentSize(0),
+        : maxSize(static_cast<size_t>(maxSizeMB) * 1024 * 1024), currentSize(0),
           maxAge(maxAge)
     {
         // check for cache size overflow
-        if (maxSize / (1024 * 1024) != maxSizeMB) // calculate: 1024*1024=1048576(1MB)
+        if (maxSize / (1024 * 1024) !=
+            maxSizeMB) // calculate: 1024*1024=1048576(1MB)
         {
             throw std::overflow_error("Cache size overflow");
         }
@@ -351,7 +374,8 @@ public:
 
     // retrieve an item from cache - O(1) average case
     template <typename Vector>
-    bool get(const std::string &key, Vector &data, std::string &mimeType, time_t &lastModified)
+    bool get(const std::string &key, Vector &data, std::string &mimeType,
+             time_t &lastModified)
     {
         std::shared_lock<std::shared_mutex> lock(mutex);
         auto it = cache.find(key);
@@ -405,13 +429,15 @@ public:
         lruList.push_front(key);
         try
         {
-            cache.emplace(key, CacheEntry(data, mimeType, lastModified, lruList.begin()));
+            cache.emplace(key,
+                          CacheEntry(data, mimeType, lastModified, lruList.begin()));
             currentSize += data.size();
         }
         catch (const std::exception &e)
         {
             lruList.pop_front(); // rollback on failure
-            Logger::getInstance()->error("Cache allocation failed: " + std::string(e.what()));
+            Logger::getInstance()->error("Cache allocation failed: " +
+                                         std::string(e.what()));
         }
     }
 
@@ -459,35 +485,6 @@ public:
         std::shared_lock<std::shared_mutex> lock(mutex);
         return cache.size();
     }
-
-    // get maximum age of cache entries - O(1)
-    std::chrono::seconds getMaxAge() const
-    {
-        return maxAge; // no lock needed for immutable value
-    }
-
-    // set a new maximum age for cache entries - O(1)
-    void setMaxAge(std::chrono::seconds newMaxAge)
-    {
-        std::unique_lock<std::shared_mutex> lock(mutex);
-        maxAge = newMaxAge;
-    }
-
-    // structure to hold cache statistics
-    struct CacheStats
-    {
-        size_t currentSize;          // current cache size in bytes
-        size_t maxSize;              // maximum cache size in bytes
-        size_t itemCount;            // number of items in cache
-        std::chrono::seconds maxAge; // maximum age of cache entries
-    };
-
-    // get cache statistics - O(1)
-    CacheStats getStats() const
-    {
-        std::shared_lock<std::shared_mutex> lock(mutex);
-        return {currentSize, maxSize, cache.size(), maxAge};
-    }
 };
 
 class Middleware
@@ -503,15 +500,19 @@ public:
     RateLimiter(size_t maxRequests, std::chrono::seconds timeWindow)
         : maxRequests(maxRequests), timeWindow(timeWindow) {}
 
-    std::string process(const std::string &data) override // override process method
+    std::string
+    process(const std::string &data) override // override process method
     {
-        std::lock_guard<std::mutex> lock(rateMutex); // lock mutex to protect clientRequests map
+        std::lock_guard<std::mutex> lock(
+            rateMutex); // lock mutex to protect clientRequests map
 
         auto now = std::chrono::steady_clock::now(); // get current timestamp
 
-        auto &timestamps = clientRequests[data]; // retrieve reference to list of timestamps
+        auto &timestamps =
+            clientRequests[data]; // retrieve reference to list of timestamps
 
-        while (!timestamps.empty() && now - timestamps.front() > timeWindow) // remove expired timestamps
+        while (!timestamps.empty() &&
+               now - timestamps.front() > timeWindow) // remove expired timestamps
         {
             timestamps.pop_front(); // remove oldest timestamp
         }
@@ -535,8 +536,11 @@ public:
 private:
     size_t maxRequests;              // maximum number of requests allowed within time window
     std::chrono::seconds timeWindow; // duration of time window for rate limiting
-    // map to store timestamps of requests for each client, identified by their data
-    std::unordered_map<std::string, std::deque<std::chrono::steady_clock::time_point>> clientRequests;
+    // map to store timestamps of requests for each client, identified by their
+    // data
+    std::unordered_map<std::string,
+                       std::deque<std::chrono::steady_clock::time_point>>
+        clientRequests;
     std::mutex rateMutex; // mutex to protect access to clientRequests
 };
 
@@ -544,48 +548,49 @@ class Compression : public Middleware
 {
 public:
     [[nodiscard]]
-    static bool shouldCompress(const std::string &mimeType, size_t contentLength)
+    static bool shouldCompress(const std::string &mimeType,
+                               size_t contentLength)
     {
-        // define non-compressible mime types using unordered_set for efficient look-up
+        // define non-compressible mime types using unordered_set for efficient
+        // look-up
         static const std::unordered_set<std::string> nonCompressibleTypes = {
-            "image/png", "image/gif", "image/svg+xml", "image/x-icon", "image/webp",
-            "audio/mpeg", "video/mp4", "video/webm", "application/zip", "font/woff",
-            "font/woff2", "font/ttf", "application/vnd.ms-fontobject"};
+            "image/png",
+            "image/gif",
+            "image/svg+xml",
+            "image/x-icon",
+            "image/webp",
+            "audio/mpeg",
+            "video/mp4",
+            "video/webm",
+            "application/zip",
+            "font/woff",
+            "font/woff2",
+            "font/ttf",
+            "application/vnd.ms-fontobject"};
 
         // define compressible mime types using unordered_set for efficient look-up
         static const std::unordered_set<std::string> compressibleTypes = {
-            "text/", "application/javascript", "application/json",
-            "application/xml", "application/x-yaml", "application/x-www-form-urlencoded"};
+            "text/",
+            "application/javascript",
+            "application/json",
+            "application/xml",
+            "application/x-yaml",
+            "application/x-www-form-urlencoded"};
 
-        // check if it's a non-compressible type
-        if (nonCompressibleTypes.find(mimeType) != nonCompressibleTypes.end())
-        {
-            return false;
-        }
-
-        // don't compress if content length is less than 1kb
-        if (contentLength < 1024)
+        // Return false if it's a non-compressible type or content length is less
+        // than 1KB
+        if (nonCompressibleTypes.count(mimeType) > 0 || contentLength < 1024)
         {
             return false;
         }
 
         // Check if MIME type is compressible
-        for (const auto &type : compressibleTypes)
-        {
-            if (mimeType.find(type) == 0) // Check for prefix match
-            {
-                return true;
-            }
-        }
-
-        return false; // default case: do not compress
-    }
-
-    [[nodiscard]]
-    static bool clientAcceptsGzip(const std::string &request)
-    {
-        return request.find("Accept-Encoding: ") != std::string::npos &&
-               request.find("gzip") != std::string::npos;
+        return std::any_of(compressibleTypes.begin(), compressibleTypes.end(),
+                           [&](const std::string &type)
+                           {
+                               return mimeType.find(type) ==
+                                      0; // Check for prefix match
+                           });
     }
 
     [[nodiscard]]
@@ -594,7 +599,9 @@ public:
         std::string compressed = compressData(data);
         if (!compressed.empty()) // check if compression was successful
         {
-            Logger::getInstance()->info("Compressed data: " + std::to_string(data.size()) + " -> " + std::to_string(compressed.size()));
+            Logger::getInstance()->info(
+                "Compressed data: " + std::to_string(data.size()) + " -> " +
+                std::to_string(compressed.size()));
             return compressed;
         }
         return data; // Ensure a string is returned in all cases
@@ -608,17 +615,19 @@ private:
         memset(&zs, 0, sizeof(zs)); // zero-initialize z_stream structure
 
         // Initialize the zlib compression
-        if (deflateInit2(&zs, Z_DEFAULT_COMPRESSION,  // set compression level
-                         Z_DEFLATED,                  // use deflate compression method
-                         15 | 16,                     // 15 | 16 for gzip encoding
-                         8,                           // set window size
-                         Z_DEFAULT_STRATEGY) != Z_OK) // use default compression strategy
+        if (deflateInit2(&zs, Z_DEFAULT_COMPRESSION, // set compression level
+                         Z_DEFLATED,                 // use deflate compression method
+                         15 | 16,                    // 15 | 16 for gzip encoding
+                         8,                          // set window size
+                         Z_DEFAULT_STRATEGY) !=
+            Z_OK) // use default compression strategy
         {
             throw std::runtime_error("Failed to initialize zlib");
         }
 
         // set input data for compression
-        zs.next_in = reinterpret_cast<Bytef *>(const_cast<char *>(data.data())); // input data
+        zs.next_in = reinterpret_cast<Bytef *>(
+            const_cast<char *>(data.data())); // input data
         zs.avail_in = data.size();
         // size of input data
 
@@ -630,12 +639,14 @@ private:
         // compress data in a loop until all data is processed
         do
         {
-            zs.next_out = reinterpret_cast<Bytef *>(outbuffer); // output buffer for compressed data
-            zs.avail_out = bufferSize;                          // size of output buffer
+            zs.next_out = reinterpret_cast<Bytef *>(
+                outbuffer);            // output buffer for compressed data
+            zs.avail_out = bufferSize; // size of output buffer
 
             ret = deflate(&zs, Z_FINISH); // perform compression operation
 
-            if (compressed.size() < zs.total_out) // append compressed data to output string
+            if (compressed.size() <
+                zs.total_out) // append compressed data to output string
             {
                 compressed.append(outbuffer, zs.total_out - compressed.size());
             }
@@ -657,16 +668,10 @@ class ThreadPool
 {
 public:
     // constructor: Initialize thread pool with specified number of threads
-    explicit ThreadPool(size_t numThreads)
-    {
-        start(numThreads);
-    }
+    explicit ThreadPool(size_t numThreads) { start(numThreads); }
 
     // destructor: Ensure proper cleanup of all threads
-    ~ThreadPool()
-    {
-        stop();
-    }
+    ~ThreadPool() { stop(); }
 
     // Disable copy operations to prevent resource duplication
     ThreadPool(const ThreadPool &) = delete;
@@ -724,29 +729,15 @@ public:
         std::swap(tasks, empty);
     }
 
-    // Get the number of threads in the pool
-    [[nodiscard]]
-    size_t threadCount() const
-    {
-        return workers.size();
-    }
-
-    // Get the current size of the task queue
-    [[nodiscard]]
-    size_t queueSize() const
-    {
-        // Only need shared lock for reading queue size
-        std::shared_lock<std::shared_mutex> lock(taskMutex);
-        return tasks.size();
-    }
-
 private:
     std::vector<std::thread> workers;        // Container for worker threads
     std::queue<std::function<void()>> tasks; // Task queue
-    mutable std::shared_mutex taskMutex;     // Read-write lock for protecting task queue
-    std::condition_variable_any condition;   // Condition variable that works with shared_mutex
-    std::atomic<bool> stop_flag{false};      // Flag to signal thread pool shutdown
-    std::atomic<size_t> active_threads{0};   // Counter for currently active threads
+    mutable std::shared_mutex
+        taskMutex; // Read-write lock for protecting task queue
+    std::condition_variable_any
+        condition;                         // Condition variable that works with shared_mutex
+    std::atomic<bool> stop_flag{false};    // Flag to signal thread pool shutdown
+    std::atomic<size_t> active_threads{0}; // Counter for currently active threads
 
     // Set CPU affinity for a thread
     bool setThreadAffinity(pthread_t thread, size_t thread_id)
@@ -769,8 +760,8 @@ private:
         int rc = pthread_setaffinity_np(thread, sizeof(cpu_set_t), &cpuset);
         if (rc != 0)
         {
-            Logger::getInstance()->warning(
-                "Thread affinity setting failed: " + std::string(strerror(rc)));
+            Logger::getInstance()->warning("Thread affinity setting failed: " +
+                                           std::string(strerror(rc)));
             return false;
         }
         return true;
@@ -786,63 +777,65 @@ private:
         {
             workers.emplace_back([this, i]
                                  {
-                pthread_setname_np(pthread_self(), ("worker-" + std::to_string(i)).c_str());
-                setThreadAffinity(pthread_self(), i);
+        pthread_setname_np(pthread_self(),
+                           ("worker-" + std::to_string(i)).c_str());
+        setThreadAffinity(pthread_self(), i);
 
-                while (true) {
-                    std::function<void()> task;
-                    {
-                        // Use shared lock initially for reading
-                        std::shared_lock<std::shared_mutex> lock(taskMutex);
-                        
-                        auto waitResult = condition.wait_for(lock, 
-                            std::chrono::milliseconds(100), 
-                            [this] { return stop_flag || !tasks.empty(); }
-                        );
+        while (true) {
+          std::function<void()> task;
+          {
+            // Use shared lock initially for reading
+            std::shared_lock<std::shared_mutex> lock(taskMutex);
 
-                        if (stop_flag && tasks.empty()) {
-                            return;
-                        }
+            auto waitResult = condition.wait_for(
+                lock, std::chrono::milliseconds(100),
+                [this] { return stop_flag || !tasks.empty(); });
 
-                        if (!tasks.empty()) {
-                            // Upgrade to unique lock for task extraction
-                            lock.unlock();
-                            std::unique_lock<std::shared_mutex> uniqueLock(taskMutex);
-                            if (!tasks.empty()) {  // Check again after acquiring unique lock
-                                task = std::move(tasks.front());
-                                tasks.pop();
-                            }
-                        } else if (!waitResult) {
-                            continue;
-                        }
-                    }
+            if (stop_flag && tasks.empty()) {
+              return;
+            }
 
-                    if (task) {
-                        active_threads++;
-                        try {
-                            task();
-                        } catch (const std::exception& e) {
-                            Logger::getInstance()->error(
-                                "Thread pool task exception: " + std::string(e.what())
-                            );
-                        } catch (...) {
-                            Logger::getInstance()->error("Unknown exception in thread pool task");
-                        }
-                        active_threads--;
-                    }
-                } });
+            if (!tasks.empty()) {
+              // Upgrade to unique lock for task extraction
+              lock.unlock();
+              std::unique_lock<std::shared_mutex> uniqueLock(taskMutex);
+              if (!tasks.empty()) { // Check again after acquiring unique lock
+                task = std::move(tasks.front());
+                tasks.pop();
+              }
+            } else if (!waitResult) {
+              continue;
+            }
+          }
+
+          if (task) {
+            active_threads++;
+            try {
+              task();
+            } catch (const std::exception &e) {
+              Logger::getInstance()->error("Thread pool task exception: " +
+                                           std::string(e.what()));
+            } catch (...) {
+              Logger::getInstance()->error(
+                  "Unknown exception in thread pool task");
+            }
+            active_threads--;
+          }
+        } });
         }
 
         Logger::getInstance()->success(
             "Thread pool initialized with " + std::to_string(numThreads) +
-            " threads" + (num_cores > 0 ? " across " + std::to_string(num_cores) + " CPU cores" : " (CPU core count unknown)"));
+            " threads" +
+            (num_cores > 0 ? " across " + std::to_string(num_cores) + " CPU cores"
+                           : " (CPU core count unknown)"));
     }
 };
 
 class Socket
 {
 public:
-    Socket(int port);
+    explicit Socket(int port);
     ~Socket();
     void bind();
     void listen();
@@ -850,9 +843,11 @@ public:
     int acceptConnection(std::string &clientIp);
     int getSocketFd() const;
 
-    static std::string durationToString(const std::chrono::steady_clock::duration &duration)
+    static std::string
+    durationToString(const std::chrono::steady_clock::duration &duration)
     {
-        auto seconds = std::chrono::duration_cast<std::chrono::seconds>(duration).count();
+        auto seconds =
+            std::chrono::duration_cast<std::chrono::seconds>(duration).count();
         auto minutes = seconds / 60;
         seconds %= 60;
         return std::to_string(minutes) + "m " + std::to_string(seconds) + "s";
@@ -868,18 +863,21 @@ Socket::Socket(int port) : port(port)
     // Create a dual-stack socket that supports both IPv6 and IPv4
     if ((server_fd = socket(AF_INET6, SOCK_STREAM, 0)) == -1)
     {
-        Logger::getInstance()->error("Socket creation failed: " + std::string(strerror(errno)));
+        Logger::getInstance()->error("Socket creation failed: " +
+                                     std::string(strerror(errno)));
         throw std::runtime_error("Socket creation failed!");
     }
 
     try
     {
         // Lambda for handling setsockopt calls
-        auto setSocketOption = [this](int level, int optname, const void *optval, socklen_t optlen, const char *errorMsg)
+        auto setSocketOption = [this](int level, int optname, const void *optval,
+                                      socklen_t optlen, const char *errorMsg)
         {
             if (setsockopt(server_fd, level, optname, optval, optlen) < 0)
             {
-                throw std::runtime_error(std::string(errorMsg) + ": " + std::string(strerror(errno)));
+                throw std::runtime_error(std::string(errorMsg) + ": " +
+                                         std::string(strerror(errno)));
             }
         };
 
@@ -894,7 +892,9 @@ Socket::Socket(int port) : port(port)
                         "Failed to set SO_REUSEADDR | SO_REUSEPORT");
 
         // Set send/receive buffer sizes for better performance
-        int bufSize = 1024 * 1024; // 1MB buffer (i don't know if this is a good size and should i make it as a configurable parameter ?)
+        int bufSize =
+            1024 * 1024; // 1MB buffer (i don't know if this is a good size and
+                         // should i make it as a configurable parameter ?)
         setSocketOption(SOL_SOCKET, SO_RCVBUF, &bufSize, sizeof(bufSize),
                         "Failed to set SO_RCVBUF");
         setSocketOption(SOL_SOCKET, SO_SNDBUF, &bufSize, sizeof(bufSize),
@@ -904,23 +904,28 @@ Socket::Socket(int port) : port(port)
         int flags = fcntl(server_fd, F_GETFL, 0);
         if (flags == -1)
         {
-            throw std::runtime_error("Failed to get socket flags: " + std::string(strerror(errno)));
+            throw std::runtime_error("Failed to get socket flags: " +
+                                     std::string(strerror(errno)));
         }
         if (fcntl(server_fd, F_SETFL, flags | O_NONBLOCK) < 0)
         {
-            throw std::runtime_error("Failed to set non-blocking mode: " + std::string(strerror(errno)));
+            throw std::runtime_error("Failed to set non-blocking mode: " +
+                                     std::string(strerror(errno)));
         }
 
         // Note: We don't set the following here because they are managed elsewhere:
         // - TCP_CORK: Managed by SocketOptionGuard in Http::sendResponse
-        // - SO_KEEPALIVE and related: Set in Http::setupSocketOptions for each client
+        // - SO_KEEPALIVE and related: Set in Http::setupSocketOptions for each
+        // client
         // - TCP_NODELAY: Not used as we're using TCP_CORK for static file serving
 
-        Logger::getInstance()->success("Socket created and configured successfully");
+        Logger::getInstance()->success(
+            "Socket created and configured successfully");
     }
     catch (const std::exception &e)
     {
-        Logger::getInstance()->error("Socket configuration failed: " + std::string(e.what()));
+        Logger::getInstance()->error("Socket configuration failed: " +
+                                     std::string(e.what()));
         close(server_fd);
         throw;
     }
@@ -940,19 +945,23 @@ void Socket::bind()
     address.sin6_addr = in6addr_any; // Bind to all available interfaces
     address.sin6_port = htons(port); // Set port
 
-    if (::bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) // Bind socket to address and port
+    if (::bind(server_fd, reinterpret_cast<struct sockaddr *>(&address),
+               sizeof(address)) < 0) // Bind socket to address and port
     {
         std::string errorMsg = "Bind failed: " + std::string(strerror(errno));
         Logger::getInstance()->error(errorMsg);
         throw std::runtime_error(errorMsg);
     }
 
-    Logger::getInstance()->success("Socket successfully bound to port " + std::to_string(port));
+    Logger::getInstance()->success("Socket successfully bound to port " +
+                                   std::to_string(port));
 }
 
 void Socket::listen()
 {
-    ::listen(server_fd, 42); // 42 is the ultimate answer to life, the universe, and everything
+    ::listen(
+        server_fd,
+        42); // 42 is the ultimate answer to life, the universe, and everything
 }
 void Socket::closeSocket()
 {
@@ -968,14 +977,17 @@ int Socket::acceptConnection(std::string &clientIp)
 {
     struct sockaddr_in6 address;
     socklen_t addrlen = sizeof(address);
-    int new_socket = accept(server_fd, (struct sockaddr *)&address, &addrlen); // Accept a new connection
+    int new_socket =
+        accept(server_fd, reinterpret_cast<struct sockaddr *>(&address),
+               &addrlen); // Accept a new connection
 
     if (new_socket >= 0)
     {
         char ipstr[INET6_ADDRSTRLEN];
         if (address.sin6_family == AF_INET6)
         {
-            inet_ntop(AF_INET6, &address.sin6_addr, ipstr, sizeof(ipstr)); // Convert IPv6 address to string
+            inet_ntop(AF_INET6, &address.sin6_addr, ipstr,
+                      sizeof(ipstr)); // Convert IPv6 address to string
         }
         clientIp = ipstr;
         Logger::getInstance()->success("New connection accepted from " + clientIp);
@@ -1015,7 +1027,8 @@ public:
     static void sendResponse(int client_socket, const std::string &content,
                              const std::string &mimeType, int statusCode,
                              const std::string &clientIp, bool isIndex = false,
-                             Middleware *middleware = nullptr, Cache *cache = nullptr);
+                             Middleware *middleware = nullptr,
+                             Cache *cache = nullptr);
     static bool isAssetRequest(const std::string &path);
 
 private:
@@ -1085,43 +1098,33 @@ private:
     };
 
     // Helper functions declarations
-    static bool setupSocketOptions(int client_socket, int cork, const std::string &clientIp);
+    static bool setupSocketOptions(int client_socket, int cork,
+                                   const std::string &clientIp);
     static bool handleFileContent(FileGuard &fileGuard,
                                   const std::string &filePath,
                                   std::pmr::vector<char> &fileContent,
-                                  size_t &fileSize,
-                                  time_t &lastModified,
+                                  size_t &fileSize, time_t &lastModified,
                                   const std::string &clientIp);
     static bool compressContent(Middleware *middleware,
-                                const std::string &mimeType,
-                                size_t fileSize,
+                                const std::string &mimeType, size_t fileSize,
                                 std::pmr::vector<char> &fileContent,
                                 std::pmr::string &compressedContent,
-                                bool cacheHit,
-                                FileGuard &fileGuard,
+                                bool cacheHit, const FileGuard &fileGuard,
                                 std::pmr::monotonic_buffer_resource &pool);
     static std::string generateHeaders(int statusCode,
                                        const std::string &mimeType,
-                                       size_t fileSize,
-                                       time_t lastModified,
+                                       size_t fileSize, time_t lastModified,
                                        bool isCompressed);
-    static size_t sendWithWritev(int client_socket,
-                                 const std::string &headerStr,
+    static size_t sendWithWritev(int client_socket, const std::string &headerStr,
                                  const std::pmr::string &compressedContent,
                                  const std::pmr::vector<char> &fileContent,
-                                 bool isCompressed,
-                                 bool cacheHit,
+                                 bool isCompressed, bool cacheHit,
                                  const std::string &clientIp);
-    static size_t sendLargeFile(int client_socket,
-                                FileGuard &fileGuard,
-                                size_t fileSize,
-                                const std::string &clientIp);
-    static void updateCache(Cache *cache,
-                            const std::string &filePath,
-                            const std::string &mimeType,
-                            time_t lastModified,
-                            FileGuard &fileGuard,
-                            size_t fileSize,
+    static size_t sendLargeFile(int client_socket, const FileGuard &fileGuard,
+                                size_t fileSize, const std::string &clientIp);
+    static void updateCache(Cache *cache, const std::string &filePath,
+                            const std::string &mimeType, time_t lastModified,
+                            const FileGuard &fileGuard, size_t fileSize,
                             std::pmr::monotonic_buffer_resource &pool);
 };
 bool Http::isAssetRequest(const std::string &path)
@@ -1135,10 +1138,8 @@ bool Http::isAssetRequest(const std::string &path)
     // this avoids converting the entire path
     alignas(8) char lastChars[10]; // Aligned for better memory access
     const size_t checkLen = std::min(pathLen, size_t(10));
-    std::transform(
-        path.end() - checkLen, path.end(),
-        lastChars,
-        ::tolower);
+    std::transform(path.end() - checkLen, path.end(), lastChars, ::tolower);
+
     std::string_view lastView(lastChars, checkLen);
 
     // Most common image types and web assets first (ordered by frequency)
@@ -1180,10 +1181,11 @@ bool Http::isAssetRequest(const std::string &path)
         {
             std::string_view ext(lastChars + (dotPos - (pathLen - checkLen)),
                                  checkLen - (dotPos - (pathLen - checkLen)));
-            for (const auto &rareExt : rareExts)
+            if (std::any_of(rareExts.begin(), rareExts.end(),
+                            [&](const auto &rareExt)
+                            { return ext == rareExt; }))
             {
-                if (ext == rareExt)
-                    return true;
+                return true;
             }
         }
     }
@@ -1199,12 +1201,12 @@ bool Http::isAssetRequest(const std::string &path)
     };
 
     // use likely/unlikely for better branch prediction
-    for (const auto &dir : hotDirs)
+    if (std::any_of(hotDirs.begin(), hotDirs.end(),
+                    [&](const auto &dir)
+                    { return pathView.starts_with(dir); }))
+        [[likely]]
     {
-        if (pathView.starts_with(dir)) [[likely]]
-        {
-            return true;
-        }
+        return true;
     }
 
     // cold path: less common directories
@@ -1214,12 +1216,10 @@ bool Http::isAssetRequest(const std::string &path)
     // check cold directories only if hot directories didn't match
     if (pathLen > 7) [[unlikely]]
     {
-        for (const auto &dir : coldDirs)
+        if (std::any_of(coldDirs.begin(), coldDirs.end(), [&](const auto &dir)
+                        { return pathView.find(dir) != std::string_view::npos; }))
         {
-            if (pathView.find(dir) != std::string_view::npos)
-            {
-                return true;
-            }
+            return true;
         }
     }
 
@@ -1231,7 +1231,8 @@ std::string Http::getRequestPath(const std::string &request)
 {
     size_t pos1 = request.find("GET ");
     size_t pos2 = request.find(" HTTP/");
-    if (pos1 == std::string::npos || pos2 == std::string::npos) // Check if request is valid
+    if (pos1 == std::string::npos ||
+        pos2 == std::string::npos) // Check if request is valid
     {
         return "/";
     }
@@ -1281,7 +1282,8 @@ void Http::sendResponse(int client_socket, const std::string &filePath,
     FileGuard fileGuard;
     if (!cacheHit)
     {
-        if (!handleFileContent(fileGuard, filePath, fileContent, fileSize, lastModified, clientIp))
+        if (!handleFileContent(fileGuard, filePath, fileContent, fileSize,
+                               lastModified, clientIp))
         {
             return;
         }
@@ -1294,8 +1296,9 @@ void Http::sendResponse(int client_socket, const std::string &filePath,
     if (middleware && Compression::shouldCompress(mimeType, fileSize) &&
         mimeType.find("image/") == std::string::npos)
     {
-        isCompressed = compressContent(middleware, mimeType, fileSize, fileContent,
-                                       compressedContent, cacheHit, fileGuard, pool);
+        isCompressed =
+            compressContent(middleware, mimeType, fileSize, fileContent,
+                            compressedContent, cacheHit, fileGuard, pool);
         if (isCompressed)
         {
             fileSize = compressedContent.size();
@@ -1303,78 +1306,90 @@ void Http::sendResponse(int client_socket, const std::string &filePath,
     }
 
     // Generate response headers
-    std::string headerStr = generateHeaders(statusCode, mimeType, fileSize, lastModified, isCompressed);
+    std::string headerStr = generateHeaders(statusCode, mimeType, fileSize,
+                                            lastModified, isCompressed);
 
     // Send headers and content using writev
-    totalBytesSent += sendWithWritev(client_socket, headerStr, compressedContent,
-                                     fileContent, isCompressed, cacheHit, clientIp);
+    totalBytesSent +=
+        sendWithWritev(client_socket, headerStr, compressedContent, fileContent,
+                       isCompressed, cacheHit, clientIp);
 
     // Handle large file transfer using sendfile or mmap
     if (!isCompressed && !cacheHit && fileGuard.get() != -1)
     {
-        totalBytesSent += sendLargeFile(client_socket, fileGuard, fileSize, clientIp);
+        totalBytesSent +=
+            sendLargeFile(client_socket, fileGuard, fileSize, clientIp);
 
         // Update cache if needed
         if (cache && statusCode == 200)
         {
-            updateCache(cache, filePath, mimeType, lastModified, fileGuard, fileSize, pool);
+            updateCache(cache, filePath, mimeType, lastModified, fileGuard, fileSize,
+                        pool);
         }
     }
 
     // Record performance metrics
     auto endTime = std::chrono::steady_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(endTime - startTime);
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
+        endTime - startTime);
 
     if (isIndex)
     {
         Logger::getInstance()->info(
             "Response sent: status=" + std::to_string(statusCode) +
-                ", path=" + filePath +
-                ", size=" + std::to_string(fileSize) +
-                ", type=" + mimeType +
-                ", cache=" + (cacheHit ? "HIT" : "MISS") +
+                ", path=" + filePath + ", size=" + std::to_string(fileSize) +
+                ", type=" + mimeType + ", cache=" + (cacheHit ? "HIT" : "MISS") +
                 ", time=" + std::to_string(duration.count()) + "µs" +
                 ", bytes=" + std::to_string(totalBytesSent),
             clientIp);
     }
 }
-bool Http::setupSocketOptions(int client_socket, int cork, const std::string &clientIp)
+bool Http::setupSocketOptions(int client_socket, int cork,
+                              const std::string &clientIp)
 {
-    auto setSocketOption = [&](int level, int optname, const void *optval, socklen_t optlen)
+    auto setSocketOption = [&](int level, int optname, const void *optval,
+                               socklen_t optlen)
     {
         if (setsockopt(client_socket, level, optname, optval, optlen) < 0)
         {
-            Logger::getInstance()->error("Failed to set socket option: " + std::string(strerror(errno)), clientIp);
+            Logger::getInstance()->error("Failed to set socket option: " +
+                                             std::string(strerror(errno)),
+                                         clientIp);
             close(client_socket);
             return false;
         }
         return true;
     };
 
-    return setSocketOption(SOL_SOCKET, SO_KEEPALIVE, &SocketSettings::keepAlive, sizeof(SocketSettings::keepAlive)) &&
-           setSocketOption(IPPROTO_TCP, TCP_KEEPIDLE, &SocketSettings::keepIdle, sizeof(SocketSettings::keepIdle)) &&
-           setSocketOption(IPPROTO_TCP, TCP_KEEPINTVL, &SocketSettings::keepInterval, sizeof(SocketSettings::keepInterval)) &&
-           setSocketOption(IPPROTO_TCP, TCP_KEEPCNT, &SocketSettings::keepCount, sizeof(SocketSettings::keepCount)) &&
+    return setSocketOption(SOL_SOCKET, SO_KEEPALIVE, &SocketSettings::keepAlive,
+                           sizeof(SocketSettings::keepAlive)) &&
+           setSocketOption(IPPROTO_TCP, TCP_KEEPIDLE, &SocketSettings::keepIdle,
+                           sizeof(SocketSettings::keepIdle)) &&
+           setSocketOption(IPPROTO_TCP, TCP_KEEPINTVL,
+                           &SocketSettings::keepInterval,
+                           sizeof(SocketSettings::keepInterval)) &&
+           setSocketOption(IPPROTO_TCP, TCP_KEEPCNT, &SocketSettings::keepCount,
+                           sizeof(SocketSettings::keepCount)) &&
            setSocketOption(IPPROTO_TCP, TCP_CORK, &cork, sizeof(cork));
 }
 
-bool Http::handleFileContent(FileGuard &fileGuard,
-                             const std::string &filePath,
+bool Http::handleFileContent(FileGuard &fileGuard, const std::string &filePath,
                              std::pmr::vector<char> &fileContent,
-                             size_t &fileSize,
-                             time_t &lastModified,
+                             size_t &fileSize, time_t &lastModified,
                              const std::string &clientIp)
 {
     // Open file with O_DIRECT for large files to bypass system cache
     int flags = O_RDONLY;
     struct stat statBuf;
-    if (stat(filePath.c_str(), &statBuf) == 0 && statBuf.st_size > 10 * 1024 * 1024) // 10MB threshold
+    if (stat(filePath.c_str(), &statBuf) == 0 &&
+        statBuf.st_size > 10 * 1024 * 1024) // 10MB threshold
     {
         flags |= O_DIRECT;
     }
 
     int fd = open(filePath.c_str(), flags);
-    if (fd == -1 && errno == EINVAL) // O_DIRECT not supported, fallback to normal open
+    if (fd == -1 &&
+        errno == EINVAL) // O_DIRECT not supported, fallback to normal open
     {
         fd = open(filePath.c_str(), O_RDONLY);
     }
@@ -1382,8 +1397,7 @@ bool Http::handleFileContent(FileGuard &fileGuard,
     if (fd == -1)
     {
         Logger::getInstance()->error(
-            "Failed to open file: errno=" + std::to_string(errno),
-            clientIp);
+            "Failed to open file: errno=" + std::to_string(errno), clientIp);
         return false;
     }
     fileGuard.reset(fd);
@@ -1394,9 +1408,8 @@ bool Http::handleFileContent(FileGuard &fileGuard,
     struct stat file_stat;
     if (fstat(fd, &file_stat) == -1)
     {
-        Logger::getInstance()->error(
-            "Fstat failed: errno=" + std::to_string(errno),
-            clientIp);
+        Logger::getInstance()->error("Fstat failed: errno=" + std::to_string(errno),
+                                     clientIp);
         return false;
     }
 
@@ -1405,18 +1418,16 @@ bool Http::handleFileContent(FileGuard &fileGuard,
     return true;
 }
 
-bool Http::compressContent(Middleware *middleware,
-                           const std::string &mimeType,
-                           size_t fileSize,
-                           std::pmr::vector<char> &fileContent,
-                           std::pmr::string &compressedContent,
-                           bool cacheHit,
-                           FileGuard &fileGuard,
+bool Http::compressContent(Middleware *middleware, const std::string &mimeType,
+                           size_t fileSize, std::pmr::vector<char> &fileContent,
+                           std::pmr::string &compressedContent, bool cacheHit,
+                           const FileGuard &fileGuard,
                            std::pmr::monotonic_buffer_resource &pool)
 {
     if (cacheHit)
     {
-        compressedContent = middleware->process(std::string(fileContent.begin(), fileContent.end()));
+        compressedContent = middleware->process(
+            std::string(fileContent.begin(), fileContent.end()));
     }
     else
     {
@@ -1450,14 +1461,13 @@ bool Http::compressContent(Middleware *middleware,
             totalRead += bytesRead;
         }
 
-        compressedContent = middleware->process(std::string(buffer.begin(), buffer.end()));
+        compressedContent =
+            middleware->process(std::string(buffer.begin(), buffer.end()));
     }
     return true;
 }
-std::string Http::generateHeaders(int statusCode,
-                                  const std::string &mimeType,
-                                  size_t fileSize,
-                                  time_t lastModified,
+std::string Http::generateHeaders(int statusCode, const std::string &mimeType,
+                                  size_t fileSize, time_t lastModified,
                                   bool isCompressed)
 {
     // Pre-allocate header string capacity
@@ -1468,11 +1478,13 @@ std::string Http::generateHeaders(int statusCode,
     char timeBuffer[128], lastModifiedBuffer[128];
     time_t now = time(nullptr);
     struct tm tmBuf;
-    struct tm *tm_info = gmtime_r(&now, &tmBuf); // Thread-safe version
-    strftime(timeBuffer, sizeof(timeBuffer), "%a, %d %b %Y %H:%M:%S GMT", tm_info);
+    const struct tm *tm_info = gmtime_r(&now, &tmBuf); // Thread-safe version
+    strftime(timeBuffer, sizeof(timeBuffer), "%a, %d %b %Y %H:%M:%S GMT",
+             tm_info);
 
     tm_info = gmtime_r(&lastModified, &tmBuf);
-    strftime(lastModifiedBuffer, sizeof(lastModifiedBuffer), "%a, %d %b %Y %H:%M:%S GMT", tm_info);
+    strftime(lastModifiedBuffer, sizeof(lastModifiedBuffer),
+             "%a, %d %b %Y %H:%M:%S GMT", tm_info);
 
     // Status message lookup using array for better performance
     static const char *const STATUS_MESSAGES[] = {
@@ -1493,7 +1505,9 @@ std::string Http::generateHeaders(int statusCode,
     };
 
     const char *statusMessage;
-    if (statusCode >= 200 && statusCode < static_cast<int>(sizeof(STATUS_MESSAGES) / sizeof(char *)) + 200)
+    if (statusCode >= 200 &&
+        statusCode <
+            static_cast<int>(sizeof(STATUS_MESSAGES) / sizeof(char *)) + 200)
     {
         statusMessage = STATUS_MESSAGES[statusCode - 200];
         if (!statusMessage)
@@ -1505,23 +1519,28 @@ std::string Http::generateHeaders(int statusCode,
     }
 
     // Assemble response headers using string
-    headerStr = "HTTP/1.1 " + std::to_string(statusCode) + " " + statusMessage + "\r\n"
-                                                                                 "Server: RobustHTTP/1.0\r\n"
-                                                                                 "Date: " +
-                std::string(timeBuffer) + "\r\n"
-                                          "Content-Type: " +
-                mimeType + "\r\n"
-                           "Content-Length: " +
-                std::to_string(fileSize) + "\r\n"
-                                           "Last-Modified: " +
-                std::string(lastModifiedBuffer) + "\r\n"
-                                                  "Connection: keep-alive\r\n"
-                                                  "Keep-Alive: timeout=60, max=1000\r\n"
-                                                  "Accept-Ranges: bytes\r\n"
-                                                  "Cache-Control: public, max-age=31536000\r\n"
-                                                  "X-Content-Type-Options: nosniff\r\n"
-                                                  "X-Frame-Options: SAMEORIGIN\r\n"
-                                                  "X-XSS-Protection: 1; mode=block\r\n";
+    headerStr = "HTTP/1.1 " + std::to_string(statusCode) + " " + statusMessage +
+                "\r\n"
+                "Server: RobustHTTP/1.0\r\n"
+                "Date: " +
+                std::string(timeBuffer) +
+                "\r\n"
+                "Content-Type: " +
+                mimeType +
+                "\r\n"
+                "Content-Length: " +
+                std::to_string(fileSize) +
+                "\r\n"
+                "Last-Modified: " +
+                std::string(lastModifiedBuffer) +
+                "\r\n"
+                "Connection: keep-alive\r\n"
+                "Keep-Alive: timeout=60, max=1000\r\n"
+                "Accept-Ranges: bytes\r\n"
+                "Cache-Control: public, max-age=31536000\r\n"
+                "X-Content-Type-Options: nosniff\r\n"
+                "X-Frame-Options: SAMEORIGIN\r\n"
+                "X-XSS-Protection: 1; mode=block\r\n";
 
     if (isCompressed)
     {
@@ -1533,12 +1552,10 @@ std::string Http::generateHeaders(int statusCode,
     return headerStr;
 }
 
-size_t Http::sendWithWritev(int client_socket,
-                            const std::string &headerStr,
+size_t Http::sendWithWritev(int client_socket, const std::string &headerStr,
                             const std::pmr::string &compressedContent,
                             const std::pmr::vector<char> &fileContent,
-                            bool isCompressed,
-                            bool cacheHit,
+                            bool isCompressed, bool cacheHit,
                             const std::string &clientIp)
 {
     // Optimize writev using maximum allowed iovec structures
@@ -1566,8 +1583,9 @@ size_t Http::sendWithWritev(int client_socket,
 
     // Send headers and content using writev with retry logic
     size_t totalSent = 0;
-    const size_t totalSize = headerStr.size() +
-                             (isCompressed ? compressedContent.size() : (cacheHit ? fileContent.size() : 0));
+    const size_t totalSize =
+        headerStr.size() + (isCompressed ? compressedContent.size()
+                                         : (cacheHit ? fileContent.size() : 0));
 
     while (totalSent < totalSize)
     {
@@ -1576,12 +1594,12 @@ size_t Http::sendWithWritev(int client_socket,
         {
             if (errno == EAGAIN || errno == EWOULDBLOCK)
             {
-                std::this_thread::sleep_for(std::chrono::microseconds(1000)); // 1ms sleep
-                continue;                                                     // retry
+                std::this_thread::sleep_for(
+                    std::chrono::microseconds(1000)); // 1ms sleep
+                continue;                             // retry
             }
             Logger::getInstance()->error(
-                "Failed to send response: errno=" + std::to_string(errno),
-                clientIp);
+                "Failed to send response: errno=" + std::to_string(errno), clientIp);
             return totalSent;
         }
         totalSent += sent;
@@ -1605,10 +1623,8 @@ size_t Http::sendWithWritev(int client_socket,
     }
     return totalSent;
 }
-size_t Http::sendLargeFile(int client_socket,
-                           FileGuard &fileGuard,
-                           size_t fileSize,
-                           const std::string &clientIp)
+size_t Http::sendLargeFile(int client_socket, const FileGuard &fileGuard,
+                           size_t fileSize, const std::string &clientIp)
 {
     size_t totalSent = 0;
     off_t offset = 0;
@@ -1624,8 +1640,9 @@ size_t Http::sendLargeFile(int client_socket,
         {
             if (errno == EAGAIN || errno == EWOULDBLOCK)
             {
-                std::this_thread::sleep_for(std::chrono::microseconds(1000)); // 1ms sleep
-                continue;                                                     // retry
+                std::this_thread::sleep_for(
+                    std::chrono::microseconds(1000)); // 1ms sleep
+                continue;                             // retry
             }
             else if (errno == EINVAL || errno == ENOSYS)
             {
@@ -1633,8 +1650,7 @@ size_t Http::sendLargeFile(int client_socket,
                 break;
             }
             Logger::getInstance()->error(
-                "Failed to send file: errno=" + std::to_string(errno),
-                clientIp);
+                "Failed to send file: errno=" + std::to_string(errno), clientIp);
             return totalSent;
         }
         else if (sent == 0)
@@ -1653,7 +1669,8 @@ size_t Http::sendLargeFile(int client_socket,
             flags |= MAP_HUGETLB;
         }
 
-        void *mmapAddr = mmap(nullptr, fileSize, PROT_READ, flags, fileGuard.get(), 0);
+        void *mmapAddr =
+            mmap(nullptr, fileSize, PROT_READ, flags, fileGuard.get(), 0);
         if (mmapAddr == MAP_FAILED && (flags & MAP_HUGETLB))
         {
             flags &= ~MAP_HUGETLB;
@@ -1663,8 +1680,7 @@ size_t Http::sendLargeFile(int client_socket,
         if (mmapAddr == MAP_FAILED)
         {
             Logger::getInstance()->error(
-                "Mmap failed: errno=" + std::to_string(errno),
-                clientIp);
+                "Mmap failed: errno=" + std::to_string(errno), clientIp);
             return totalSent;
         }
 
@@ -1679,17 +1695,19 @@ size_t Http::sendLargeFile(int client_socket,
         while (remainingBytes > 0)
         {
             size_t chunk = std::min(BUFFER_SIZE, remainingBytes);
-            ssize_t sent = send(client_socket, fileContent + bytesSent, chunk, MSG_NOSIGNAL);
+            ssize_t sent =
+                send(client_socket, fileContent + bytesSent, chunk, MSG_NOSIGNAL);
             if (sent == -1)
             {
                 if (errno == EAGAIN || errno == EWOULDBLOCK)
                 {
-                    std::this_thread::sleep_for(std::chrono::microseconds(1000)); // 1ms sleep
-                    continue;                                                     // retry
+                    std::this_thread::sleep_for(
+                        std::chrono::microseconds(1000)); // 1ms sleep
+                    continue;                             // retry
                 }
-                Logger::getInstance()->error(
-                    "Failed to send mmap data: errno=" + std::to_string(errno),
-                    clientIp);
+                Logger::getInstance()->error("Failed to send mmap data: errno=" +
+                                                 std::to_string(errno),
+                                             clientIp);
                 return totalSent + bytesSent;
             }
             bytesSent += sent;
@@ -1701,12 +1719,9 @@ size_t Http::sendLargeFile(int client_socket,
     return totalSent;
 }
 
-void Http::updateCache(Cache *cache,
-                       const std::string &filePath,
-                       const std::string &mimeType,
-                       time_t lastModified,
-                       FileGuard &fileGuard,
-                       size_t fileSize,
+void Http::updateCache(Cache *cache, const std::string &filePath,
+                       const std::string &mimeType, time_t lastModified,
+                       const FileGuard &fileGuard, size_t fileSize,
                        std::pmr::monotonic_buffer_resource &pool)
 {
     std::pmr::vector<char> content{&pool};
@@ -1715,7 +1730,8 @@ void Http::updateCache(Cache *cache,
     if (lseek(fileGuard.get(), 0, SEEK_SET) != -1)
     {
         // Use aligned buffer for optimal read performance
-        std::unique_ptr<char[]> alignedBuffer(new (std::align_val_t{ALIGNMENT}) char[BUFFER_SIZE]);
+        std::unique_ptr<char[]> alignedBuffer(
+            new (std::align_val_t{ALIGNMENT}) char[BUFFER_SIZE]);
         size_t totalRead = 0;
 
         while (totalRead < fileSize)
@@ -1726,7 +1742,7 @@ void Http::updateCache(Cache *cache,
                 break;
 
             content.insert(content.end(), alignedBuffer.get(),
-                           alignedBuffer.get() + bytesRead);
+                           static_cast<char *>(alignedBuffer.get()) + bytesRead);
             totalRead += bytesRead;
         }
 
@@ -1734,6 +1750,10 @@ void Http::updateCache(Cache *cache,
         if (totalRead == fileSize)
         {
             cache->set(filePath, content, mimeType, lastModified);
+            Logger::getInstance()->info(TerminalUtils::highlight(
+                "set cache: " + filePath +
+                " cache size: " + std::to_string(cache->size()) +
+                ", cache count: " + std::to_string(cache->count())));
         }
     }
 }
@@ -1741,20 +1761,19 @@ void Http::updateCache(Cache *cache,
 class Router
 {
 public:
-    Router(const std::string &staticFolder) : staticFolder(staticFolder)
+    explicit Router(const std::string &staticFolder)
+        : staticFolder(staticFolder)
     {
-        Logger::getInstance()->success("Router initialized with static folder: " + staticFolder);
+        Logger::getInstance()->success("Router initialized with static folder: " +
+                                       staticFolder);
     }
-    void route(const std::string &path, int client_socket, const std::string &clientIp, Middleware *middleware, Cache *cache);
-    [[nodiscard]]
-    std::string getStaticFolder() const
-    {
-        return staticFolder;
-    }
+    void route(const std::string &path, int client_socket,
+               const std::string &clientIp, Middleware *middleware, Cache *cache);
 
 private:
-    std::string staticFolder;                         // path to static files
-    std::string getMimeType(const std::string &path); // get MIME type based on file extension
+    std::string staticFolder; // path to static files
+    std::string
+    getMimeType(const std::string &path); // get MIME type based on file extension
 };
 
 [[nodiscard]]
@@ -1771,32 +1790,31 @@ std::string Router::getMimeType(const std::string &path)
 
     // define valid extensions set for quick validation
     static const std::set<std::string_view> validExts = {
-        ".html", ".htm", ".css", ".js", ".json", ".png",
-        ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".txt",
-        ".pdf", ".xml", ".zip", ".woff", ".woff2", ".ttf",
-        ".eot", ".mp3", ".mp4", ".webm", ".webp"};
+        ".html", ".htm", ".css", ".js", ".json", ".png", ".jpg", ".jpeg",
+        ".gif", ".svg", ".ico", ".txt", ".pdf", ".xml", ".zip", ".woff",
+        ".woff2", ".ttf", ".eot", ".mp3", ".mp4", ".webm", ".webp"};
 
     // define MIME type mappings for validated extensions
-    static const std::unordered_map<std::string_view, std::string_view> mimeTypes = {
-        {".css", "text/css"},
-        {".js", "application/javascript"},
-        {".json", "application/json"},
-        {".png", "image/png"},
-        {".gif", "image/gif"},
-        {".svg", "image/svg+xml"},
-        {".ico", "image/x-icon"},
-        {".txt", "text/plain"},
-        {".pdf", "application/pdf"},
-        {".xml", "application/xml"},
-        {".zip", "application/zip"},
-        {".woff", "font/woff"},
-        {".woff2", "font/woff2"},
-        {".ttf", "font/ttf"},
-        {".eot", "application/vnd.ms-fontobject"},
-        {".mp3", "audio/mpeg"},
-        {".mp4", "video/mp4"},
-        {".webm", "video/webm"},
-        {".webp", "image/webp"}};
+    static const std::unordered_map<std::string_view, std::string_view>
+        mimeTypes = {{".css", "text/css"},
+                     {".js", "application/javascript"},
+                     {".json", "application/json"},
+                     {".png", "image/png"},
+                     {".gif", "image/gif"},
+                     {".svg", "image/svg+xml"},
+                     {".ico", "image/x-icon"},
+                     {".txt", "text/plain"},
+                     {".pdf", "application/pdf"},
+                     {".xml", "application/xml"},
+                     {".zip", "application/zip"},
+                     {".woff", "font/woff"},
+                     {".woff2", "font/woff2"},
+                     {".ttf", "font/ttf"},
+                     {".eot", "application/vnd.ms-fontobject"},
+                     {".mp3", "audio/mpeg"},
+                     {".mp4", "video/mp4"},
+                     {".webm", "video/webm"},
+                     {".webp", "image/webp"}};
 
     // find last dot in path
     size_t dotPos = path.find_last_of('.');
@@ -1809,11 +1827,8 @@ std::string Router::getMimeType(const std::string &path)
     // this avoids string allocation for the extension
     char lastChars[10]; // max extension length
     const size_t extLen = std::min(path.length() - dotPos, size_t(10));
-    std::transform(
-        path.begin() + dotPos,
-        path.begin() + dotPos + extLen,
-        lastChars,
-        ::tolower);
+    std::transform(path.begin() + dotPos, path.begin() + dotPos + extLen,
+                   lastChars, ::tolower);
     std::string_view ext(lastChars, extLen);
 
     // quick validation check
@@ -1837,8 +1852,9 @@ std::string Router::getMimeType(const std::string &path)
     return it != mimeTypes.end() ? std::string(it->second) : TEXT_PLAIN;
 }
 
-void Router::route(const std::string &path, int client_socket, const std::string &clientIp,
-                   Middleware *middleware, Cache *cache)
+void Router::route(const std::string &path, int client_socket,
+                   const std::string &clientIp, Middleware *middleware,
+                   Cache *cache)
 {
     // pre-allocate string capacity to avoid reallocation
     // +11 accounts for potential "/index.html" addition
@@ -1850,7 +1866,8 @@ void Router::route(const std::string &path, int client_socket, const std::string
     // normalize path to lowercase for case-insensitive comparison
     // using a separate string to preserve original path for logging
     std::string normalizedPath = path;
-    std::transform(normalizedPath.begin(), normalizedPath.end(), normalizedPath.begin(), ::tolower);
+    std::transform(normalizedPath.begin(), normalizedPath.end(),
+                   normalizedPath.begin(), ::tolower);
 
     // use string_view for efficient string operations
     // this avoids string copies during comparisons
@@ -1873,20 +1890,10 @@ void Router::route(const std::string &path, int client_socket, const std::string
         Logger::getInstance()->info("Processing request: " + path, clientIp);
     }
 
-    // static response for 404 errors
-    // this avoids creating the string repeatedly
-    static const char *SIMPLE_404_RESPONSE =
-        "HTTP/1.1 404 Not Found\r\n"
-        "Content-Type: text/plain\r\n"
-        "Content-Length: 9\r\n"
-        "\r\n"
-        "Not Found";
-
     // cache for 404.html content
     // using static variables and std::once_flag for thread-safe initialization
     static std::string cached404Content;
     static std::once_flag flag404;
-    static bool has404File = false;
 
     // check if file exists and handle 404 errors
     if (!fs::exists(filePath) || (isDir && !fs::exists(filePath)))
@@ -1897,35 +1904,41 @@ void Router::route(const std::string &path, int client_socket, const std::string
             Logger::getInstance()->warning("File not found: " + filePath, clientIp);
         }
 
+        static bool has404File = false;
         // initialize 404.html content only once
         // this is thread-safe due to std::call_once
         std::call_once(flag404, [&]()
                        {
-            std::ifstream file("404.html", std::ios::binary);
-            if (file) {
-                has404File = true;
-                // efficient file reading using iterators
-                cached404Content.assign(
-                    std::istreambuf_iterator<char>(file),
-                    std::istreambuf_iterator<char>()
-                );
-            } });
+      std::ifstream file("404.html", std::ios::binary);
+      if (file) {
+        has404File = true;
+        // efficient file reading using iterators
+        cached404Content.assign(std::istreambuf_iterator<char>(file),
+                                std::istreambuf_iterator<char>());
+      } });
 
         // send simple 404 response if custom 404.html doesn't exist
         if (!has404File)
         {
+            // static response for 404 errors
+            // this avoids creating the string repeatedly
+            static const char *SIMPLE_404_RESPONSE = "HTTP/1.1 404 Not Found\r\n"
+                                                     "Content-Type: text/plain\r\n"
+                                                     "Content-Length: 9\r\n"
+                                                     "\r\n"
+                                                     "Not Found";
             // use MSG_NOSIGNAL to prevent SIGPIPE
-            send(client_socket, SIMPLE_404_RESPONSE, strlen(SIMPLE_404_RESPONSE), MSG_NOSIGNAL);
+            send(client_socket, SIMPLE_404_RESPONSE, strlen(SIMPLE_404_RESPONSE),
+                 MSG_NOSIGNAL);
             return;
         }
 
         // static response header for 404 errors
         // this is shared across all 404 responses
-        static const std::string RESPONSE_404_HEADER =
-            "HTTP/1.1 404 Not Found\r\n"
-            "Content-Type: text/html\r\n"
-            "Connection: close\r\n"
-            "Content-Length: ";
+        static const std::string RESPONSE_404_HEADER = "HTTP/1.1 404 Not Found\r\n"
+                                                       "Content-Type: text/html\r\n"
+                                                       "Connection: close\r\n"
+                                                       "Content-Length: ";
 
         // use writev for efficient response sending
         // this minimizes the number of system calls
@@ -1946,7 +1959,9 @@ void Router::route(const std::string &path, int client_socket, const std::string
         // send all components in a single system call
         if (writev(client_socket, iov, 4) == -1)
         {
-            Logger::getInstance()->error("Failed to send 404 response: " + std::string(strerror(errno)), clientIp);
+            Logger::getInstance()->error("Failed to send 404 response: " +
+                                             std::string(strerror(errno)),
+                                         clientIp);
         }
         return;
     }
@@ -1976,7 +1991,8 @@ Config Parser::parseConfig(const std::string &configFilePath)
     std::ifstream file(configFilePath);
     if (!file.is_open())
     {
-        Logger::getInstance()->error("Could not open config file: " + configFilePath);
+        Logger::getInstance()->error("Could not open config file: " +
+                                     configFilePath);
         throw std::runtime_error("Could not open config file!");
     }
 
@@ -1988,22 +2004,31 @@ Config Parser::parseConfig(const std::string &configFilePath)
     }
     catch (const json::parse_error &e)
     {
-        Logger::getInstance()->error("JSON parsing error: " + std::string(e.what()));
+        Logger::getInstance()->error("JSON parsing error: " +
+                                     std::string(e.what()));
         throw std::runtime_error("Failed to parse configuration file");
     }
 
     // check if all required fields exist and are not null
     if (!configJson.contains("port") || configJson["port"].is_null() ||
-        !configJson.contains("static_folder") || configJson["static_folder"].is_null() ||
-        !configJson.contains("thread_count") || configJson["thread_count"].is_null() ||
-        !configJson.contains("rate_limit") || configJson["rate_limit"].is_null() ||
-        !configJson["rate_limit"].contains("max_requests") || configJson["rate_limit"]["max_requests"].is_null() ||
-        !configJson["rate_limit"].contains("time_window") || configJson["rate_limit"]["time_window"].is_null() ||
+        !configJson.contains("static_folder") ||
+        configJson["static_folder"].is_null() ||
+        !configJson.contains("thread_count") ||
+        configJson["thread_count"].is_null() ||
+        !configJson.contains("rate_limit") ||
+        configJson["rate_limit"].is_null() ||
+        !configJson["rate_limit"].contains("max_requests") ||
+        configJson["rate_limit"]["max_requests"].is_null() ||
+        !configJson["rate_limit"].contains("time_window") ||
+        configJson["rate_limit"]["time_window"].is_null() ||
         !configJson.contains("cache") || configJson["cache"].is_null() ||
-        !configJson["cache"].contains("size_mb") || configJson["cache"]["size_mb"].is_null() ||
-        !configJson["cache"].contains("max_age_seconds") || configJson["cache"]["max_age_seconds"].is_null())
+        !configJson["cache"].contains("size_mb") ||
+        configJson["cache"]["size_mb"].is_null() ||
+        !configJson["cache"].contains("max_age_seconds") ||
+        configJson["cache"]["max_age_seconds"].is_null())
     {
-        Logger::getInstance()->error("Configuration file is missing required fields or contains null values");
+        Logger::getInstance()->error("Configuration file is missing required "
+                                     "fields or contains null values");
         throw std::runtime_error("Incomplete configuration file");
     }
 
@@ -2015,54 +2040,65 @@ Config Parser::parseConfig(const std::string &configFilePath)
     config.rateLimit.maxRequests = configJson["rate_limit"]["max_requests"];
     config.rateLimit.timeWindow = configJson["rate_limit"]["time_window"];
     config.cache.sizeMB = configJson["cache"]["size_mb"].get<size_t>();
-    config.cache.maxAgeSeconds = configJson["cache"]["max_age_seconds"].get<int>();
+    config.cache.maxAgeSeconds =
+        configJson["cache"]["max_age_seconds"].get<int>();
 
     // validate port number
     if (config.port <= 0 || config.port > 65535)
     {
-        Logger::getInstance()->error("Invalid port number: " + std::to_string(config.port));
+        Logger::getInstance()->error("Invalid port number: " +
+                                     std::to_string(config.port));
         throw std::runtime_error("Invalid port number");
     }
 
     // validate static folder path
     if (!fs::exists(config.staticFolder))
     {
-        Logger::getInstance()->error("Static folder does not exist: " + config.staticFolder);
+        Logger::getInstance()->error("Static folder does not exist: " +
+                                     config.staticFolder);
         throw std::runtime_error("Invalid static folder path");
     }
 
     // validate thread count
     if (config.threadCount <= 0 || config.threadCount > 1000)
     {
-        Logger::getInstance()->error("Invalid thread count: " + std::to_string(config.threadCount));
+        Logger::getInstance()->error("Invalid thread count: " +
+                                     std::to_string(config.threadCount));
         throw std::runtime_error("Invalid thread count");
     }
 
     // validate maximum requests for rate limiting
     if (config.rateLimit.maxRequests <= 0)
     {
-        Logger::getInstance()->error("Invalid max requests for rate limiting: " + std::to_string(config.rateLimit.maxRequests));
+        Logger::getInstance()->error("Invalid max requests for rate limiting: " +
+                                     std::to_string(config.rateLimit.maxRequests));
         throw std::runtime_error("Invalid max requests for rate limiting");
     }
 
     // validate time window for rate limiting
     if (config.rateLimit.timeWindow <= 0)
     {
-        Logger::getInstance()->error("Invalid time window for rate limiting: " + std::to_string(config.rateLimit.timeWindow));
+        Logger::getInstance()->error("Invalid time window for rate limiting: " +
+                                     std::to_string(config.rateLimit.timeWindow));
         throw std::runtime_error("Invalid time window for rate limiting");
     }
 
     // validate cache size
-    if (config.cache.sizeMB <= 0 || config.cache.sizeMB > std::numeric_limits<size_t>::max() / (1024 * 1024))
+    if (config.cache.sizeMB == 0 ||
+        config.cache.sizeMB >
+            std::numeric_limits<size_t>::max() / (1024 * 1024))
     {
-        Logger::getInstance()->error("Invalid cache size: " + std::to_string(config.cache.sizeMB) + " MB");
+        Logger::getInstance()->error(
+            "Invalid cache size: " + std::to_string(config.cache.sizeMB) + " MB");
         throw std::runtime_error("Invalid cache size");
     }
 
     // validate cache max age
     if (config.cache.maxAgeSeconds <= 0)
     {
-        Logger::getInstance()->error("Invalid cache max age: " + std::to_string(config.cache.maxAgeSeconds) + " seconds");
+        Logger::getInstance()->error(
+            "Invalid cache max age: " + std::to_string(config.cache.maxAgeSeconds) +
+            " seconds");
         throw std::runtime_error("Invalid cache max age");
     }
 
@@ -2081,7 +2117,8 @@ public:
     {
         if (epoll_fd == -1)
         {
-            throw std::system_error(errno, std::system_category(), "epoll_create1 failed");
+            throw std::system_error(errno, std::system_category(),
+                                    "epoll_create1 failed");
         }
     }
 
@@ -2101,12 +2138,14 @@ public:
     */
 
     // optimized move operations
-    inline EpollWrapper(EpollWrapper &&other) noexcept : epoll_fd(other.epoll_fd)
+    inline EpollWrapper(EpollWrapper &&other) noexcept
+        : epoll_fd(other.epoll_fd)
     {
         other.epoll_fd = -1;
     }
 
-    inline EpollWrapper &operator=(EpollWrapper &&other) noexcept // move assignment operator
+    inline EpollWrapper &
+    operator=(EpollWrapper &&other) noexcept // move assignment operator
     {
         if (this != &other)
         {
@@ -2122,12 +2161,14 @@ public:
         return epoll_fd;
     }
 
-    [[nodiscard]] inline int wait(struct epoll_event *events, int maxEvents, int timeout) noexcept
+    [[nodiscard]] inline int wait(struct epoll_event *events, int maxEvents,
+                                  int timeout) noexcept
     {
         return epoll_wait(epoll_fd, events, maxEvents, timeout);
     }
 
-    inline bool add(int fd, uint32_t events) noexcept // add fd to epoll set with optimized error handling
+    inline bool add(int fd, uint32_t events) noexcept // add fd to epoll set with
+                                                      // optimized error handling
     {
 
         struct epoll_event ev;
@@ -2136,7 +2177,9 @@ public:
         return epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &ev) == 0;
     }
 
-    inline bool modify(int fd, uint32_t events) noexcept // modify fd in epoll set with optimized error handling
+    inline bool modify(int fd,
+                       uint32_t events) noexcept // modify fd in epoll set with
+                                                 // optimized error handling
     {
         struct epoll_event ev;
         ev.events = events;
@@ -2144,15 +2187,16 @@ public:
         return epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) == 0;
     }
 
-    inline bool remove(int fd) noexcept // remove fd from epoll set with optimized error handling
+    inline bool remove(
+        int fd) noexcept // remove fd from epoll set with optimized error handling
     {
 
         return epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, nullptr) == 0;
     }
 
     template <typename Iterator>
-    inline size_t batch_operation(Iterator begin, Iterator end,
-                                  int op, uint32_t events = 0) noexcept
+    inline size_t batch_operation(Iterator begin, Iterator end, int op,
+                                  uint32_t events = 0) noexcept
     {
         size_t success_count = 0;
         struct epoll_event ev;
@@ -2162,7 +2206,8 @@ public:
         {
             const int fd = *it; // get file descriptor
             ev.data.fd = fd;
-            if (epoll_ctl(epoll_fd, op, fd, (op == EPOLL_CTL_DEL) ? nullptr : &ev) == 0)
+            if (epoll_ctl(epoll_fd, op, fd, (op == EPOLL_CTL_DEL) ? nullptr : &ev) ==
+                0)
             {
                 ++success_count;
             }
@@ -2170,7 +2215,8 @@ public:
         return success_count;
     }
 
-    [[nodiscard]] inline bool is_monitored(int fd) const noexcept // check if fd is monitored by epoll
+    [[nodiscard]] inline bool
+    is_monitored(int fd) const noexcept // check if fd is monitored by epoll
     {
         struct epoll_event ev;
         return epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) != -1 || errno != ENOENT;
@@ -2180,14 +2226,18 @@ private:
     int epoll_fd; // epoll file descriptor
 
     // Static assertions for compile-time checks
-    static_assert(sizeof(int) >= sizeof(void *) || sizeof(int64_t) >= sizeof(void *), // check if int or int64_t can store a pointer
-                  "Platform must support storing pointers in epoll_data");
+    static_assert(
+        sizeof(int) >= sizeof(void *) ||
+            sizeof(int64_t) >=
+                sizeof(void *), // check if int or int64_t can store a pointer
+        "Platform must support storing pointers in epoll_data");
 };
 
 class Server
 {
 public:
-    Server(int port, const std::string &staticFolder, int threadCount, int maxRequests, int timeWindow, int cacheSizeMB, int maxAgeSeconds);
+    Server(int port, const std::string &staticFolder, int threadCount,
+           int maxRequests, int timeWindow, int cacheSizeMB, int maxAgeSeconds);
     void start();
     void stop();
 
@@ -2207,35 +2257,38 @@ private:
     void logRequest(int client_socket, const std::string &message);
 };
 
-Server::Server(int port, const std::string &staticFolder, int threadCount, int maxRequests, int timeWindow, int cacheSizeMB, int maxAgeSeconds)
-    : socket(port),
-      router(staticFolder),
-      pool(threadCount),
-      epoll(),
+Server::Server(int port, const std::string &staticFolder, int threadCount,
+               int maxRequests, int timeWindow, int cacheSizeMB,
+               int maxAgeSeconds)
+    : socket(port), router(staticFolder), pool(threadCount), epoll(),
       rateLimiter(maxRequests, std::chrono::seconds(timeWindow)),
       cache(cacheSizeMB, std::chrono::seconds(maxAgeSeconds))
 {
+    Logger::getInstance()->info(
+        TerminalUtils::step(1, "Initializing server components..."));
     std::ostringstream oss;
     oss << "Creating dual-stack server on port: " << port
         << "\n   static folder: " << staticFolder
-        << "\n   thread count: " << threadCount
-        << ", rate limit: " << maxRequests << " requests per " << timeWindow << " seconds"
+        << "\n   thread count: " << threadCount << ", rate limit: " << maxRequests
+        << " requests per " << timeWindow << " seconds"
         << "\n   cache size: " << cacheSizeMB << "MB"
         << ", cache max age: " << maxAgeSeconds << " seconds";
 
     Logger::getInstance()->info(oss.str());
+    Logger::getInstance()->info(TerminalUtils::step(2, "Binding socket..."));
     socket.bind();
+    Logger::getInstance()->info(TerminalUtils::step(3, "Listening on socket..."));
     socket.listen();
 }
 
 void Server::start()
 {
-    Logger::getInstance()->success("Server starting up...");
 
     try
     {
         // pre-allocate events array with optimal size
-        static constexpr size_t MAX_EVENTS = 1024; // again i don't know should i make it as a config or not
+        static constexpr size_t MAX_EVENTS =
+            1024; // again i don't know should i make it as a config or not
         struct epoll_event events[MAX_EVENTS];
 
         // Efficient timeout tracking with pre-allocated vector
@@ -2245,16 +2298,18 @@ void Server::start()
 
         // add server socket to epoll
         epoll.add(socket.getSocketFd(), EPOLLIN);
-        Logger::getInstance()->success("Server is ready and waiting for connections...");
 
         while (!shouldStop)
         {
             // use shorter timeout for better responsiveness
-            int nfds = epoll.wait(events, MAX_EVENTS, 100); //(another parameter i don't know should i make it as a config or not)
+            int nfds = epoll.wait(events, MAX_EVENTS,
+                                  100); //(another parameter i don't know should i
+                                        // make it as a config or not)
 
             // Only check timeouts when system load is not high
             auto now = std::chrono::steady_clock::now();
-            if (static_cast<size_t>(nfds) < MAX_EVENTS && now - lastTimeoutCheck > std::chrono::seconds(30))
+            if (static_cast<size_t>(nfds) < MAX_EVENTS &&
+                now - lastTimeoutCheck > std::chrono::seconds(30))
             {
                 std::vector<int> timeoutSockets;
                 timeoutSockets.reserve(32);
@@ -2283,7 +2338,8 @@ void Server::start()
             {
                 if (errno == EINTR)
                     continue;
-                Logger::getInstance()->error("Epoll wait failed: " + std::string(strerror(errno)));
+                Logger::getInstance()->error("Epoll wait failed: " +
+                                             std::string(strerror(errno)));
                 break;
             }
 
@@ -2300,15 +2356,9 @@ void Server::start()
                     // add connection info under lock
                     {
                         std::lock_guard<std::mutex> lock(connectionsMutex);
-                        connections.emplace(
-                            client_socket,
-                            ConnectionInfo{
-                                now, // reuse timestamp
-                                clientIp,
-                                false,
-                                false,
-                                0,
-                                0});
+                        connections.emplace(client_socket,
+                                            ConnectionInfo{now, // reuse timestamp
+                                                           clientIp, false, false, 0, 0});
 
                         if (static_cast<size_t>(client_socket) < lastActivityTimes.size())
                         {
@@ -2327,7 +2377,9 @@ void Server::start()
                     }
                     catch (const std::exception &e)
                     {
-                        Logger::getInstance()->error("Failed to add client socket to epoll: " + std::string(e.what()));
+                        Logger::getInstance()->error(
+                            "Failed to add client socket to epoll: " +
+                            std::string(e.what()));
                         closeConnection(client_socket);
                         continue;
                     }
@@ -2345,7 +2397,8 @@ void Server::start()
                         if (it != connections.end())
                         {
                             clientIp = it->second.ip;
-                            if (static_cast<size_t>(client_socket) < lastActivityTimes.size())
+                            if (static_cast<size_t>(client_socket) <
+                                lastActivityTimes.size())
                             {
                                 lastActivityTimes[client_socket] = now;
                             }
@@ -2389,9 +2442,9 @@ void Server::stop()
         }
     }
 
-    for (int socket : socketsToClose)
+    for (int sock : socketsToClose)
     {
-        closeConnection(socket);
+        closeConnection(sock);
     }
 
     Logger::getInstance()->info("All connections closed");
@@ -2427,7 +2480,8 @@ void Server::handleClient(int client_socket, const std::string &clientIp)
     }
 
     // check if connection has been closed by client
-    if (valread == 0 || (valread < 0 && errno != EAGAIN && errno != EWOULDBLOCK))
+    if (valread == 0 ||
+        (valread < 0 && errno != EAGAIN && errno != EWOULDBLOCK))
     {
         closeConnection(client_socket);
         connectionClosed = true;
@@ -2463,7 +2517,8 @@ void Server::handleClient(int client_socket, const std::string &clientIp)
             // create a compression middleware instance
             Compression compressionMiddleware;
             // route request with compression middleware
-            router.route(path, client_socket, clientIp, &compressionMiddleware, &cache);
+            router.route(path, client_socket, clientIp, &compressionMiddleware,
+                         &cache);
         }
 
         // log completion of non-asset requests
@@ -2485,7 +2540,8 @@ void Server::closeConnection(int client_socket)
             auto duration = std::chrono::steady_clock::now() - it->second.startTime;
             std::string durationStr = Socket::durationToString(duration);
 
-            for (const auto &message : it->second.logBuffer) // log all buffered messages first
+            for (const auto &message :
+                 it->second.logBuffer) // log all buffered messages first
             {
                 Logger::getInstance()->info(message, it->second.ip);
             }
@@ -2507,7 +2563,8 @@ void Server::closeConnection(int client_socket)
     }
     catch (const std::exception &e)
     {
-        Logger::getInstance()->warning("Failed to remove client socket from epoll: " + std::string(e.what()));
+        Logger::getInstance()->warning(
+            "Failed to remove client socket from epoll: " + std::string(e.what()));
     }
 
     close(client_socket);
@@ -2530,20 +2587,24 @@ void signalHandler(int signum)
     running = false; // set running flag to false
 }
 
-int main(void)
+auto main(void) -> int
 {
     signal(SIGINT, signalHandler);
     signal(SIGTERM, signalHandler);
 
     try
     {
-        Config config = Parser::parseConfig("pgs_conf.json"); // parse configuration file
-        server = std::make_unique<Server>(config.port, config.staticFolder, config.threadCount,
-                                          config.rateLimit.maxRequests, config.rateLimit.timeWindow,
-                                          config.cache.sizeMB, config.cache.maxAgeSeconds); // create server instance
+        Config config =
+            Parser::parseConfig("pgs_conf.json"); // parse configuration file
+        server = std::make_unique<Server>(
+            config.port, config.staticFolder, config.threadCount,
+            config.rateLimit.maxRequests, config.rateLimit.timeWindow,
+            config.cache.sizeMB,
+            config.cache.maxAgeSeconds); // create server instance
 
-        std::thread serverThread([&]()
-                                 { server->start(); }); // start server in a separate thread
+        std::thread serverThread(
+            [&]()
+            { server->start(); }); // start server in a separate thread
 
         while (running)
         {
@@ -2554,22 +2615,14 @@ int main(void)
                                    { server->stop(); }); // initiate server shutdown in a separate thread
 
         if (shutdownThread.joinable())
-        {
             shutdownThread.join();
-        }
         else
-        {
             Logger::getInstance()->error("Failed to join shutdown thread");
-        }
 
         if (serverThread.joinable()) // join server thread
-        {
             serverThread.join();
-        }
         else
-        {
             Logger::getInstance()->error("Failed to join server thread");
-        }
     }
     catch (const std::exception &e)
     {

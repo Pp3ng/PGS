@@ -10,6 +10,10 @@ The server is built with a modular architecture, separating concerns into distin
 
 ---
 
+## How it works
+
+![Server sequence](diagram/server-sequence.png)
+
 ## Benchmarking in a 2G RAM, 2 Core CPU server
 
 ![Benchmarking](diagram/performance.png)
@@ -21,18 +25,16 @@ The server is built with a modular architecture, separating concerns into distin
 - ✨ Multi-threaded request handling
 - 📁 Static file serving
 - ⚡ Epoll-based I/O multiplexing
+- 🗜️ Gzip compression support
 - 🔧 JSON-based configuration
 - 🎯 MIME type detection
 - 📡 A default nice 404 page
 - 🚀 Thread pool for efficient concurrency
-- 📌 Directory index support (serves index.html by default)
-- 🖥️ Colored terminal output
 - 🛡️ Rate limiting middleware
 - 📝 Robust error handling
-- 📈 Performance optimizations
-- 📦 Lightweight and modular design
 - 🛠️ Easy to configure and deploy
 - 📜 Detailed logging and error reporting
+- 🔄 Keep-alive connection support
 
 ---
 

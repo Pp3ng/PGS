@@ -77,12 +77,6 @@ package "Data Structures" {
 }
 
 
-    class CacheStats <<Structure>> {
-    + currentSize: size_t
-    + maxSize: size_t
-    + itemCount: size_t
-    + maxAge: chrono::seconds
-}
 }
 
 package "Core Components" {
@@ -137,8 +131,8 @@ package "Core Components" {
 
     + Router(const string& staticFolder)
     + route(const string& path, int client_socket,\n const string& clientIp, Middleware* middleware,\n Cache* cache): void
-    + [[nodiscard]] getStaticFolder() const: string
-    - [[nodiscard]] getMimeType(const string& path): string
+    + getStaticFolder() const: string
+    - getMimeType(const string& path): string
 }
     note right of Router: Handles routing of HTTP requests\nto appropriate static files\nwith MIME type detection\nand 404 handling
 
@@ -296,7 +290,6 @@ package "Utility Classes" {
         + count() const: size_t
         + getMaxAge() const: chrono::seconds
         + setMaxAge(chrono::seconds newMaxAge): void
-        + getStats() const: CacheStats
         - updateLRU(const string& key): void
     }
     note right of Cache: Thread-safe LRU cache implementation\nwith size-based eviction,\nTTL support, and memory optimization\nusing shared mutex for concurrent access
@@ -316,8 +309,8 @@ package "Utility Classes" {
 
         + {static} shouldCompress(const string& mimeType, size_t contentLength): bool
         + {static} clientAcceptsGzip(const string& request): bool
-        + [[nodiscard]] process(const string& data) override: string
-        - [[nodiscard]] compressData(const string& data): string
+        + process(const string& data) override: string
+        - compressData(const string& data): string
     }   
 
     class Parser <<Utility>> {
@@ -339,7 +332,6 @@ Parser ..> Config : creates >
 Server ..> Config : configured by >
 
 Cache "1" o-- "0..*" CacheEntry : stores >
-Cache ..> CacheStats : produces >
 
 Http +-- SocketSettings : configures >
 Http +-- SocketOptionGuard : manages >
