@@ -178,37 +178,52 @@ note top of ThreadPool: Thread pool with read-write lock support\nfor optimized 
 }
     note right of Http: Handles HTTP request processing\nand response generation
 
-    class Logger <<Core>> {
-        - {static} instance: Logger*
-        - logFile: ofstream
-        - logMutex: mutex
-        - messageQueue: queue<LogMessage>
-        - queueMutex: mutex
-        - queueCV: condition_variable
-        - loggerThread: thread
-        - running: atomic<bool>
-        - isWaitingForEvents: bool
-        - lastEventWaitLog: chrono::steady_clock::time_point
-        - EVENT_WAIT_LOG_INTERVAL: chrono::seconds
-        + message: string
-        + level: string
-        + ip: string
-        + timestamp: chrono::system_clock::time_point
-        + LogMessage(const string&, const string&, const string&)
-        + {static} getInstance(): Logger*
-        + {static} destroyInstance(): void
-        + log(const string& message, const string& level, const string& ip): void
-        + error(const string& message, const string& ip = "-"): void
-        + info(const string& message, const string& ip = "-"): void
-        + warning(const string& message, const string& ip = "-"): void
-        + success(const string& message, const string& ip = "-"): void
-        - Logger()
-        - processLogs(): void
-        - writeLogMessage(const LogMessage& msg): void
-        - formatLogMessage(const LogMessage& msg): string
-    }
+class Logger <<Core>> {
+    - {enum} LogLevel {INFO, WARNING, ERROR, SUCCESS}
+    - {static} COLORS: array<const char*, 9>
+    - {static} BOLD: const char*
+    - {static} CHECK_MARK: const char*
+    - {static} CROSS_MARK: const char*
+    - {static} INFO_MARK: const char*
+    - {static} WARN_MARK: const char*
+    - {static} LOG_LEVELS: string_view[]
+    
+    - pool: pmr::monotonic_buffer_resource
+    - messageQueue: pmr::deque<LogMessage>
+    - mutex: shared_mutex
+    - logFile: ofstream
+    - queueCV: condition_variable_any
+    - loggerThread: jthread
+    - running: atomic<bool>
+    - lastEventWaitLog: optional<chrono::steady_clock::time_point>
+    - isWaitingForEvents: bool
+    - EVENT_WAIT_LOG_INTERVAL: chrono::seconds
+    - {static} instance: unique_ptr<Logger>
+    - {static} initFlag: once_flag
 
-    note right of Logger: Thread-safe singleton logger\nwith colored terminal output,\nIP tracking, and message buffering\nfor asynchronous logging
+    - Logger()
+    - processLogs(stop_token st): void
+    - writeLogMessage(const LogMessage& msg): void
+    - formatLogMessage(const LogMessage& msg): string
+    - {static} formatSuccess(const string& msg): string
+    - {static} formatError(const string& msg): string
+    - {static} formatInfo(const string& msg): string
+    - {static} formatWarning(const string& msg): string
+    - {static} formatStep(int num, const string& msg): string
+
+    + {static} getInstance(): Logger*
+    + {static} destroyInstance(): void
+    + log(string_view message, LogLevel level = LogLevel::INFO, string_view ip = "-"): void
+    + error(string_view message, string_view ip = "-"): void
+    + warning(string_view message, string_view ip = "-"): void
+    + success(string_view message, string_view ip = "-"): void
+    + info(string_view message, string_view ip = "-"): void
+    + step(int num, string_view message, string_view ip = "-"): void
+    + ~Logger()
+}
+
+    note right of Logger: Modern thread-safe singleton logger\nwith memory pool, shared mutex,\ncolor formatting and async logging\nusing jthread and stop tokens
+
 
 
 

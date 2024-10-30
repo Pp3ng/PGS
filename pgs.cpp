@@ -23,6 +23,7 @@
 #include <netinet/tcp.h>      // TCP_KEEPIDLE, TCP_KEEPINTVL, TCP_KEEPCNT - TCP connection keepalive options
 #include <new>                // memory alignment
 #include <nlohmann/json.hpp>  // JSON parsing
+#include <optional>           // optional type
 #include <pthread.h>          // POSIX threads
 #include <queue>              // queue data structure
 #include <sched.h>            // CPU affinity
@@ -43,8 +44,6 @@
 #include <unordered_set>      // unordered unique elements (Hash Table)
 #include <vector>             // dynamic array
 #include <zlib.h>             // zlib compression
-
-#include "terminal_utils.h"
 
 namespace fs = std::filesystem; // Alias for filesystem namespace
 using json = nlohmann::json;    // Alias for JSON namespace
@@ -85,75 +84,143 @@ struct ConnectionInfo
           isClosureLogged(closureLogged), bytesReceived(received),
           bytesSent(sent) {}
 };
+
 class Logger
 {
 private:
-    // basic logger members
-    std::mutex logMutex;   // mutex to protect log file access
-    std::ofstream logFile; // log file stream
-    static Logger *instance;
-    bool isWaitingForEvents; // new flag to track event waiting state
-    std::chrono::steady_clock::time_point
-        lastEventWaitLog; // track last event wait log time
-    static constexpr auto EVENT_WAIT_LOG_INTERVAL =
-        std::chrono::seconds(5); // log interval for waiting events
-
-    // structure to hold log message data
-    struct LogMessage
+    // Define log levels using enum class for type safety and better semantics
+    enum class LogLevel
     {
-        std::string message;                             // actual log message
-        std::string level;                               // log level (INFO, ERROR, etc.)
-        std::string ip;                                  // iP address associated with log
-        std::chrono::system_clock::time_point timestamp; // when log was created
-
-        LogMessage(const std::string &msg, const std::string &lvl,
-                   const std::string &clientIp)
-            : message(msg), level(lvl), ip(clientIp),
-              timestamp(std::chrono::system_clock::now()) {}
+        INFO,
+        WARNING,
+        ERROR,
+        SUCCESS
     };
 
-    // async logging members
-    std::queue<LogMessage> messageQueue; // queue to store pending log messages
-    std::mutex queueMutex;               // mutex to protect message queue
-    std::condition_variable
-        queueCV;                     // condition variable for queue synchronization
-    std::thread loggerThread;        // background thread for processing logs
-    std::atomic<bool> running{true}; // flag to control background thread
+    // ANSI escape codes for colors
+    static constexpr std::array<const char *, 9> COLORS = {
+        "\033[0m",  // RESET
+        "\033[30m", // BLACK
+        "\033[31m", // RED
+        "\033[32m", // GREEN
+        "\033[33m", // YELLOW
+        "\033[34m", // BLUE
+        "\033[35m", // MAGENTA
+        "\033[36m", // CYAN
+        "\033[37m", // WHITE
+    };
 
-    Logger() : isWaitingForEvents(false)
+    static constexpr const char *BOLD = "\033[1m";
+
+    // Special symbols
+    static constexpr const char *CHECK_MARK = "✅";
+    static constexpr const char *CROSS_MARK = "❌";
+    static constexpr const char *INFO_MARK = "🔵";
+    static constexpr const char *WARN_MARK = "⚠️";
+
+    // Constant string views for log levels
+    static constexpr std::string_view LOG_LEVELS[] = {
+        "INFO",
+        "WARNING",
+        "ERROR",
+        "SUCCESS"};
+
+    // Helper functions for formatting with colors
+    [[nodiscard]]
+    static std::string formatSuccess(const std::string &msg)
     {
-        logFile.open("pgs.log", std::ios::app); // open log file in append mode
-        // start background logging thread
-        loggerThread = std::thread(&Logger::processLogs, this);
-        // deliberately don't call info() here to avoid recursion
-        writeLogMessage(LogMessage("Logger initialized", "SUCCESS", "-"));
+        return std::string(COLORS[3]) + CHECK_MARK + " " + msg + COLORS[0];
     }
 
-    // process logs in background thread
-    void processLogs()
+    [[nodiscard]]
+    static std::string formatError(const std::string &msg)
     {
-        while (running)
-        {
-            std::vector<LogMessage> messages; // batch of log messages to write
-            {
-                // wait for new messages or shutdown signal
-                std::unique_lock<std::mutex> lock(queueMutex);
-                queueCV.wait_for(lock, std::chrono::seconds(1),
-                                 [this]
-                                 { return !messageQueue.empty() || !running; });
+        return std::string(COLORS[2]) + CROSS_MARK + " " + msg + COLORS[0];
+    }
 
-                // batch process up to 100 messages at once for better performance
-                while (!messageQueue.empty() && messages.size() < 100)
+    [[nodiscard]]
+    static std::string formatInfo(const std::string &msg)
+    {
+        return std::string(COLORS[5]) + INFO_MARK + " " + msg + COLORS[0];
+    }
+
+    [[nodiscard]]
+    static std::string formatWarning(const std::string &msg)
+    {
+        return std::string(COLORS[4]) + WARN_MARK + " " + msg + COLORS[0];
+    }
+
+    [[nodiscard]]
+    static std::string formatStep(int num, const std::string &msg)
+    {
+        return std::string(COLORS[6]) + "[Step " + std::to_string(num) + "] " + msg + COLORS[0];
+    }
+
+    // Enhanced log message structure
+    struct LogMessage
+    {
+        std::string message;
+        LogLevel level;
+        std::string ip;
+        std::chrono::system_clock::time_point timestamp;
+
+        LogMessage(std::string msg, LogLevel lvl, std::string clientIp)
+            : message(std::move(msg)), level(lvl), ip(std::move(clientIp)), timestamp(std::chrono::system_clock::now()) {}
+    };
+
+    // Memory management and synchronization members
+    std::pmr::monotonic_buffer_resource pool{64 * 1024};
+    std::pmr::deque<LogMessage> messageQueue{&pool};
+
+    mutable std::shared_mutex mutex;
+    std::ofstream logFile;
+    std::condition_variable_any queueCV;
+    std::jthread loggerThread;
+    std::atomic<bool> running{true};
+
+    std::optional<std::chrono::steady_clock::time_point> lastEventWaitLog;
+    bool isWaitingForEvents{false};
+
+    static constexpr auto EVENT_WAIT_LOG_INTERVAL = std::chrono::seconds(5);
+
+    static inline std::unique_ptr<Logger> instance;
+    static inline std::once_flag initFlag;
+
+    Logger()
+    {
+        logFile.open("pgs.log", std::ios::app);
+        loggerThread = std::jthread([this](std::stop_token st)
+                                    { processLogs(st); });
+        writeLogMessage({{"Logger initialized"}, LogLevel::SUCCESS, "-"});
+    }
+
+    void processLogs(std::stop_token st)
+    {
+        while (!st.stop_requested())
+        {
+            std::vector<LogMessage> messages;
+            messages.reserve(100);
+
+            {
+                std::shared_lock lock(mutex);
+                auto pred = [this]
                 {
-                    messages.push_back(std::move(messageQueue.front()));
-                    messageQueue.pop();
+                    return !messageQueue.empty() || !running;
+                };
+
+                if (queueCV.wait_for(lock, std::chrono::seconds(1), pred))
+                {
+                    while (!messageQueue.empty() && messages.size() < 100)
+                    {
+                        messages.push_back(std::move(messageQueue.front()));
+                        messageQueue.pop_front();
+                    }
                 }
             }
 
-            // write batched messages to file
             if (!messages.empty())
             {
-                std::lock_guard<std::mutex> lock(logMutex);
+                std::unique_lock lock(mutex);
                 for (const auto &msg : messages)
                 {
                     writeLogMessage(msg);
@@ -163,46 +230,32 @@ private:
         }
     }
 
-    // compile-time string hash function
-    [[nodiscard]]
-    static constexpr unsigned int hashString(std::string_view str)
-    {
-        unsigned int hash = 5381;
-        for (char c : str)
-        {
-            hash = ((hash << 5) + hash) + c;
-        }
-        return hash;
-    }
-
-    // format and write a single log message
     void writeLogMessage(const LogMessage &msg)
     {
-        std::string logMessage = formatLogMessage(msg);
-        logFile << logMessage << std::endl;
+        // Format message for file (without colors)
+        std::string fileMessage = formatLogMessage(msg);
+        logFile << fileMessage << std::endl;
 
-        // Use string_view for string comparison to avoid copies
-        std::string_view level(msg.level);
-
-        // Use switch with string hash for compile-time optimization
-        switch (hashString(level))
+        // Format message for console (with colors)
+        std::string consoleMessage;
+        switch (msg.level)
         {
-        case hashString("ERROR"):
-            std::cout << TerminalUtils::error(logMessage) << std::endl;
+        case LogLevel::ERROR:
+            consoleMessage = formatError(fileMessage);
             break;
-        case hashString("WARNING"):
-            std::cout << TerminalUtils::warning(logMessage) << std::endl;
+        case LogLevel::WARNING:
+            consoleMessage = formatWarning(fileMessage);
             break;
-        case hashString("SUCCESS"):
-            std::cout << TerminalUtils::success(logMessage) << std::endl;
+        case LogLevel::SUCCESS:
+            consoleMessage = formatSuccess(fileMessage);
             break;
         default:
-            std::cout << TerminalUtils::info(logMessage) << std::endl;
+            consoleMessage = formatInfo(fileMessage);
             break;
         }
+        std::cout << consoleMessage << std::endl;
     }
 
-    // format timestamp and log message
     [[nodiscard]]
     std::string formatLogMessage(const LogMessage &msg)
     {
@@ -211,107 +264,106 @@ private:
                       msg.timestamp.time_since_epoch()) %
                   1000;
 
-        char timestamp[32]; // buffer for timestamp
+        char timestamp[32];
         std::strftime(timestamp, sizeof(timestamp), "[%Y-%m-%d %H:%M:%S]",
-                      std::localtime(&time)); // format timestamp
+                      std::localtime(&time));
 
-        return std::string(timestamp) + "." + std::to_string(ms.count()) + " [" +
-               msg.level + "] [" + msg.ip + "] " + msg.message;
+        std::ostringstream oss;
+        oss << timestamp << "."
+            << std::setfill('0') << std::setw(3) << ms.count()
+            << " [" << LOG_LEVELS[static_cast<int>(msg.level)] << "] "
+            << "[" << msg.ip << "] "
+            << msg.message;
+
+        return oss.str();
     }
 
 public:
-    // singleton pattern implementation
     static Logger *getInstance()
     {
-        if (instance == nullptr)
-        {
-            instance = new Logger();
-        }
-        return instance;
+        std::call_once(initFlag, []()
+                       { instance = std::unique_ptr<Logger>(new Logger()); });
+        return instance.get();
     }
 
-    static void destroyInstance() // clean up
+    void log(std::string_view message, LogLevel level = LogLevel::INFO,
+             std::string_view ip = "-")
     {
-        delete instance;
-        instance = nullptr;
-    }
-
-    // ensure proper cleanup in destructor
-    ~Logger()
-    {
-        running = false;      // signal background thread to stop
-        queueCV.notify_one(); // wake up background thread
-
-        if (loggerThread.joinable())
-        {
-            loggerThread.join(); // wait for background thread to finish
-        }
-
-        if (logFile.is_open())
-        {
-            logFile.close();
-        }
-    }
-
-    // main logging function
-    void log(const std::string &message, const std::string &level = "INFO",
-             const std::string &ip = "-")
-    {
-        // handle special case for "Waiting for events" messages
         if (message == "Waiting for events...")
         {
-            std::lock_guard<std::mutex> lock(logMutex);
+            std::shared_lock lock(mutex);
             auto now = std::chrono::steady_clock::now();
 
             if (!isWaitingForEvents ||
-                (now - lastEventWaitLog) >=
-                    EVENT_WAIT_LOG_INTERVAL) // check if interval has passed
+                !lastEventWaitLog ||
+                (now - *lastEventWaitLog) >= EVENT_WAIT_LOG_INTERVAL)
             {
                 isWaitingForEvents = true;
                 lastEventWaitLog = now;
             }
             else
             {
-                return; // skip logging if we're already waiting and interval hasn't
-                        // passed
+                return;
             }
         }
         else
         {
-            isWaitingForEvents = false; // reset waiting flag
+            isWaitingForEvents = false;
         }
 
-        // queue log message for async processing
         {
-            std::lock_guard<std::mutex> lock(queueMutex);
-            messageQueue.emplace(message, level, ip);
+            std::unique_lock lock(mutex);
+            messageQueue.emplace_back(std::string(message), level, std::string(ip));
         }
-        queueCV.notify_one(); // notify background thread
+        queueCV.notify_one();
     }
 
-    // convenience methods for different log levels
-    void error(const std::string &message, const std::string &ip = "-")
+    void error(std::string_view message, std::string_view ip = "-")
     {
-        log(TerminalUtils::highlight(message), "ERROR", ip);
+        log(message, LogLevel::ERROR, ip);
     }
 
-    void warning(const std::string &message, const std::string &ip = "-")
+    void warning(std::string_view message, std::string_view ip = "-")
     {
-        log(message, "WARNING", ip);
+        log(message, LogLevel::WARNING, ip);
     }
 
-    void success(const std::string &message, const std::string &ip = "-")
+    void success(std::string_view message, std::string_view ip = "-")
     {
-        log(TerminalUtils::highlight(message), "SUCCESS", ip);
+        log(message, LogLevel::SUCCESS, ip);
     }
 
-    void info(const std::string &message, const std::string &ip = "-")
+    void info(std::string_view message, std::string_view ip = "-")
     {
-        log(message, "INFO", ip);
+        log(message, LogLevel::INFO, ip);
     }
+
+    // Helper method for step logging
+    void step(int num, std::string_view message, std::string_view ip = "-")
+    {
+        log(formatStep(num, std::string(message)), LogLevel::INFO, ip);
+    }
+
+    static void destroyInstance()
+    {
+        instance.reset();
+    }
+
+    ~Logger()
+    {
+        running = false;
+        queueCV.notify_all();
+        if (logFile.is_open())
+        {
+            logFile.close();
+        }
+    }
+
+    Logger(const Logger &) = delete;
+    Logger &operator=(const Logger &) = delete;
+    Logger(Logger &&) = delete;
+    Logger &operator=(Logger &&) = delete;
 };
-
-Logger *Logger::instance = nullptr; // initialize static singleton instance
 
 class Cache
 {
@@ -1750,7 +1802,7 @@ void Http::updateCache(Cache *cache, const std::string &filePath,
         if (totalRead == fileSize)
         {
             cache->set(filePath, content, mimeType, lastModified);
-            Logger::getInstance()->info(TerminalUtils::highlight(
+            Logger::getInstance()->info((
                 "set cache: " + filePath +
                 " cache size: " + std::to_string(cache->size()) +
                 ", cache count: " + std::to_string(cache->count())));
@@ -2264,8 +2316,8 @@ Server::Server(int port, const std::string &staticFolder, int threadCount,
       rateLimiter(maxRequests, std::chrono::seconds(timeWindow)),
       cache(cacheSizeMB, std::chrono::seconds(maxAgeSeconds))
 {
-    Logger::getInstance()->info(
-        TerminalUtils::step(1, "Initializing server components..."));
+    Logger::getInstance()->step(
+        1, "Initializing server components...");
     std::ostringstream oss;
     oss << "Creating dual-stack server on port: " << port
         << "\n   static folder: " << staticFolder
@@ -2275,9 +2327,9 @@ Server::Server(int port, const std::string &staticFolder, int threadCount,
         << ", cache max age: " << maxAgeSeconds << " seconds";
 
     Logger::getInstance()->info(oss.str());
-    Logger::getInstance()->info(TerminalUtils::step(2, "Binding socket..."));
+    Logger::getInstance()->step(2, "Binding socket...");
     socket.bind();
-    Logger::getInstance()->info(TerminalUtils::step(3, "Listening on socket..."));
+    Logger::getInstance()->step(3, "Listening on socket...");
     socket.listen();
 }
 
