@@ -8,9 +8,7 @@ The server is built with a modular architecture, separating concerns into distin
 
 ![Server Architecture](diagram/server-architecture.png)
 
-## Usecase Diagram
-
-![Usecase Diagram](diagram/server-usecase.png)
+---
 
 ## Benchmarking in a 2G RAM, 2 Core CPU server
 
