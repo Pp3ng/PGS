@@ -466,33 +466,64 @@ public:
     template <typename Vector>
     bool get(const std::string &key, Vector &data, std::string &mimeType, time_t &lastModified)
     {
-        std::shared_lock<std::shared_mutex> lock(mutex);
+        // First check with shared lock
+        std::shared_lock<std::shared_mutex> readLock(mutex);
+
         auto it = cache.find(key);
-        if (it != cache.end())
+        if (it == cache.end())
         {
-            auto now = std::chrono::system_clock::now();
-            auto entryAge = now - std::chrono::system_clock::from_time_t(it->second.lastModified);
-            if (entryAge > maxAge)
+            return false;
+        }
+
+        // Check expiration
+        auto now = std::chrono::system_clock::now();
+        auto entryAge = now - std::chrono::system_clock::from_time_t(it->second.lastModified);
+        if (entryAge > maxAge)
+        {
+            // Release shared lock and acquire exclusive lock for removal
+            readLock.unlock();
+            std::unique_lock<std::shared_mutex> writeLock(mutex);
+
+            // Re-check after acquiring exclusive lock
+            it = cache.find(key);
+            if (it != cache.end())
             {
-                lock.unlock();
-                std::unique_lock<std::shared_mutex> uniqueLock(mutex);
                 currentSize -= it->second.data.size();
                 lruList.erase(it->second.lruIterator);
                 cache.erase(it);
                 Logger::getInstance()->info("Cache entry expired: " + key);
-                return false;
             }
+            return false;
+        }
 
-            data = Vector(std::make_move_iterator(it->second.data.begin()),
-                          std::make_move_iterator(it->second.data.end()));
-            mimeType = std::move(it->second.mimeType);
-            lastModified = it->second.lastModified;
+        // Reserve space before copying/moving data
+        try
+        {
+            data.reserve(it->second.data.size());
+        }
+        catch (const std::bad_alloc &e)
+        {
+            Logger::getInstance()->error("Failed to reserve space for cached data: " + std::string(e.what()));
+            return false;
+        }
 
-            lock.unlock();
-            std::unique_lock<std::shared_mutex> uniqueLock(mutex);
+        // Copy data instead of moving to preserve cache content
+        data.assign(it->second.data.begin(), it->second.data.end());
+        mimeType = it->second.mimeType; // Copy, don't move
+        lastModified = it->second.lastModified;
+
+        // Update LRU under the same lock
+        readLock.unlock();
+        std::unique_lock<std::shared_mutex> writeLock(mutex);
+
+        // Re-check if entry still exists
+        it = cache.find(key);
+        if (it != cache.end())
+        {
             updateLRU(key);
             return true;
         }
+
         return false;
     }
 
@@ -513,10 +544,18 @@ public:
     template <typename Vector>
     void set(std::string &&key, Vector &&data, std::string &&mimeType, time_t lastModified)
     {
+        if (data.size() > maxSize)
+        {
+            return; // Don't cache if too large
+        }
+
         std::unique_lock<std::shared_mutex> lock(mutex);
 
-        // if entry already exists, remove it first
-        auto it = cache.find(key);
+        // Store key copy for lookup
+        const std::string keyCopy = key;
+
+        // Remove existing entry if present
+        auto it = cache.find(keyCopy);
         if (it != cache.end())
         {
             currentSize -= it->second.data.size();
@@ -524,27 +563,28 @@ public:
             cache.erase(it);
         }
 
-        // if new entry is too large, don't cache it
-        if (data.size() > maxSize)
-        {
-            return;
-        }
-
-        // remove least recently used entries until we have enough space
-        while (!lruList.empty() && currentSize + data.size() > maxSize)
+        // Ensure space available
+        const size_t requiredSize = data.size();
+        while (!lruList.empty() && currentSize + requiredSize > maxSize)
         {
             const std::string &lruKey = lruList.back();
-            currentSize -= cache[lruKey].data.size();
-            cache.erase(lruKey);
+            auto lruIt = cache.find(lruKey);
+            if (lruIt != cache.end())
+            {
+                currentSize -= lruIt->second.data.size();
+                cache.erase(lruIt);
+            }
             lruList.pop_back();
         }
 
-        // add new entry to front of LRU list
-        lruList.push_front(key);
-
+        // Add new entry
         try
         {
-            // emplace new entry into cache
+            // Add to LRU first
+            lruList.push_front(keyCopy);
+            auto lruIt = lruList.begin();
+
+            // Then add to cache
             cache.emplace(
                 std::piecewise_construct,
                 std::forward_as_tuple(std::move(key)),
@@ -552,15 +592,18 @@ public:
                     std::forward<Vector>(data),
                     std::move(mimeType),
                     lastModified,
-                    lruList.begin()));
+                    lruIt));
 
-            currentSize += data.size();
+            currentSize += requiredSize;
         }
         catch (const std::exception &e)
         {
-            lruList.pop_front(); // rollback on failure
-            Logger::getInstance()->error("Cache allocation failed: " +
-                                         std::string(e.what()));
+            // Rollback on failure
+            if (!lruList.empty())
+            {
+                lruList.pop_front();
+            }
+            Logger::getInstance()->error("Cache allocation failed: " + std::string(e.what()));
         }
     }
 
@@ -1761,6 +1804,7 @@ void Http::sendResponse(int client_socket, const std::string &filePath,
             clientIp);
     }
 }
+[[nodiscard]]
 bool Http::setupSocketOptions(int client_socket, int cork,
                               const std::string &clientIp)
 {
