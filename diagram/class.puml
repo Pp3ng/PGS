@@ -187,7 +187,6 @@ class ThreadPool <<Core>> {
     - {static} generateHeaders(int statusCode,\n const string& mimeType, size_t fileSize,\n time_t lastModified, bool isCompressed): string
     - {static} sendWithWritev(int client_socket,\n const string& headerStr,\n const pmr::string& compressedContent,\n const pmr::vector<char>& fileContent,\n bool isCompressed, bool cacheHit,\n const string& clientIp): size_t
     - {static} sendLargeFile(int client_socket,\n FileGuard& fileGuard, size_t fileSize,\n const string& clientIp): size_t
-    - {static} updateCache(Cache* cache,\n const string& filePath, const string& mimeType,\n time_t lastModified, FileGuard& fileGuard,\n size_t fileSize,\n pmr::monotonic_buffer_resource& pool): void
 }
     note right of Http: Handles HTTP request processing\nand response generation
 

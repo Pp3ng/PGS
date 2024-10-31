@@ -466,7 +466,6 @@ public:
     template <typename Vector>
     bool get(const std::string &key, Vector &data, std::string &mimeType, time_t &lastModified)
     {
-        // First check with shared lock
         std::shared_lock<std::shared_mutex> readLock(mutex);
 
         auto it = cache.find(key);
@@ -475,52 +474,33 @@ public:
             return false;
         }
 
-        // Check expiration
-        auto now = std::chrono::system_clock::now();
-        auto entryAge = now - std::chrono::system_clock::from_time_t(it->second.lastModified);
-        if (entryAge > maxAge)
-        {
-            // Release shared lock and acquire exclusive lock for removal
-            readLock.unlock();
-            std::unique_lock<std::shared_mutex> writeLock(mutex);
-
-            // Re-check after acquiring exclusive lock
-            it = cache.find(key);
-            if (it != cache.end())
-            {
-                currentSize -= it->second.data.size();
-                lruList.erase(it->second.lruIterator);
-                cache.erase(it);
-                Logger::getInstance()->info("Cache entry expired: " + key);
-            }
-            return false;
-        }
-
-        // Reserve space before copying/moving data
+        // Copy the cached data and metadata first
         try
         {
             data.reserve(it->second.data.size());
+            data.assign(it->second.data.begin(), it->second.data.end());
+            mimeType = it->second.mimeType;
+            lastModified = it->second.lastModified;
         }
         catch (const std::bad_alloc &e)
         {
-            Logger::getInstance()->error("Failed to reserve space for cached data: " + std::string(e.what()));
+            Logger::getInstance()->error("Failed to copy cached data: " + std::string(e.what()));
             return false;
         }
 
-        // Copy data instead of moving to preserve cache content
-        data.assign(it->second.data.begin(), it->second.data.end());
-        mimeType = it->second.mimeType; // Copy, don't move
-        lastModified = it->second.lastModified;
-
-        // Update LRU under the same lock
+        // Update LRU list under exclusive lock
         readLock.unlock();
         std::unique_lock<std::shared_mutex> writeLock(mutex);
 
-        // Re-check if entry still exists
+        // Re-check if entry still exists after lock switch
         it = cache.find(key);
         if (it != cache.end())
         {
-            updateLRU(key);
+            // Move entry to front of LRU list
+            lruList.erase(it->second.lruIterator);
+            lruList.push_front(key);
+            it->second.lruIterator = lruList.begin();
+
             return true;
         }
 
@@ -1582,11 +1562,8 @@ private:
                                  const std::string &clientIp);
     static size_t sendLargeFile(int client_socket, const FileGuard &fileGuard,
                                 size_t fileSize, const std::string &clientIp);
-    static void updateCache(Cache *cache, const std::string &filePath,
-                            const std::string &mimeType, time_t lastModified,
-                            const FileGuard &fileGuard, size_t fileSize,
-                            std::pmr::monotonic_buffer_resource &pool);
 };
+
 bool Http::isAssetRequest(const std::string &path)
 {
     // cache string length to avoid multiple calls
@@ -1774,17 +1751,84 @@ void Http::sendResponse(int client_socket, const std::string &filePath,
         sendWithWritev(client_socket, headerStr, compressedContent, fileContent,
                        isCompressed, cacheHit, clientIp);
 
-    // Handle large file transfer using sendfile or mmap
+    // Handle large file transfer and caching
     if (!isCompressed && !cacheHit && fileGuard.get() != -1)
     {
-        totalBytesSent +=
-            sendLargeFile(client_socket, fileGuard, fileSize, clientIp);
+        // Read file content once for both sending and caching
+        std::pmr::vector<char> content{&pool};
+        content.reserve(fileSize);
+        bool readSuccess = false;
 
-        if (cache && statusCode == 200)
+        // Try to read entire file into memory
+        if (lseek(fileGuard.get(), 0, SEEK_SET) != -1)
         {
-            // Update cache if need
-            updateCache(cache, std::string(filePath), std::string(mimeType),
-                        lastModified, fileGuard, fileSize, pool);
+            // Use aligned buffer for optimal read performance
+            std::unique_ptr<char[]> alignedBuffer(
+                new (std::align_val_t{ALIGNMENT}) char[BUFFER_SIZE]);
+            size_t totalRead = 0;
+
+            // Read file in chunks
+            while (totalRead < fileSize)
+            {
+                ssize_t bytesRead = read(fileGuard.get(), alignedBuffer.get(),
+                                         std::min(BUFFER_SIZE, fileSize - totalRead));
+                if (bytesRead <= 0)
+                    break;
+
+                content.insert(content.end(), alignedBuffer.get(),
+                               alignedBuffer.get() + bytesRead);
+                totalRead += bytesRead;
+            }
+
+            readSuccess = (totalRead == fileSize);
+        }
+
+        // If successfully read the file, send content and update cache
+        if (readSuccess)
+        {
+            // Send file content with retry logic
+            size_t sent = 0;
+            const char *data = content.data();
+            size_t remaining = content.size();
+
+            while (remaining > 0)
+            {
+                ssize_t byteSent = send(client_socket, data + sent, remaining, MSG_NOSIGNAL);
+                if (byteSent <= 0)
+                {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK)
+                    {
+                        // Retry after short delay
+                        std::this_thread::sleep_for(std::chrono::microseconds(1000));
+                        continue;
+                    }
+                    Logger::getInstance()->error(
+                        "Failed to send content: errno=" + std::to_string(errno), clientIp);
+                    break;
+                }
+                sent += byteSent;
+                remaining -= byteSent;
+            }
+            totalBytesSent += sent;
+
+            // Update cache if needed
+            if (cache && statusCode == 200)
+            {
+                std::string keyTemp(filePath);
+                std::string mimeTemp(mimeType);
+                cache->set(std::move(keyTemp), std::move(content),
+                           std::move(mimeTemp), lastModified);
+
+                Logger::getInstance()->info(
+                    "set cache: " + filePath +
+                    " cache size: " + std::to_string(cache->size()) +
+                    ", cache count: " + std::to_string(cache->count()));
+            }
+        }
+        else
+        {
+            // Fallback to sendLargeFile if reading fails
+            totalBytesSent += sendLargeFile(client_socket, fileGuard, fileSize, clientIp);
         }
     }
 
@@ -1804,6 +1848,7 @@ void Http::sendResponse(int client_socket, const std::string &filePath,
             clientIp);
     }
 }
+
 [[nodiscard]]
 bool Http::setupSocketOptions(int client_socket, int cork,
                               const std::string &clientIp)
@@ -2178,50 +2223,6 @@ size_t Http::sendLargeFile(int client_socket, const FileGuard &fileGuard,
     }
 
     return totalSent;
-}
-
-void Http::updateCache(Cache *cache, const std::string &filePath,
-                       const std::string &mimeType, time_t lastModified,
-                       const FileGuard &fileGuard, size_t fileSize,
-                       std::pmr::monotonic_buffer_resource &pool)
-{
-    std::pmr::vector<char> content{&pool};
-    content.reserve(fileSize);
-
-    if (lseek(fileGuard.get(), 0, SEEK_SET) != -1)
-    {
-        // Use aligned buffer for optimal read performance
-        std::unique_ptr<char[]> alignedBuffer(
-            new (std::align_val_t{ALIGNMENT}) char[BUFFER_SIZE]);
-        size_t totalRead = 0;
-
-        while (totalRead < fileSize)
-        {
-            ssize_t bytesRead = read(fileGuard.get(), alignedBuffer.get(),
-                                     std::min(BUFFER_SIZE, fileSize - totalRead));
-            if (bytesRead <= 0)
-                break;
-
-            content.insert(content.end(), alignedBuffer.get(),
-                           static_cast<char *>(alignedBuffer.get()) + bytesRead);
-            totalRead += bytesRead;
-        }
-
-        // Only update cache if we read the entire file
-        if (totalRead == fileSize)
-        {
-            // temporarily store the content in a string for move semantics
-            std::string keyTemp(filePath);
-            std::string mimeTemp(mimeType);
-            cache->set(std::move(keyTemp), std::move(content),
-                       std::move(mimeTemp), lastModified);
-
-            Logger::getInstance()->info((
-                "set cache: " + filePath +
-                " cache size: " + std::to_string(cache->size()) +
-                ", cache count: " + std::to_string(cache->count())));
-        }
-    }
 }
 
 class Router
