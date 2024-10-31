@@ -69,16 +69,37 @@ pool --> server: thread pool ready
 deactivate pool
 
 server -> cache: new Cache(sizeMB, maxAge)
+activate cache
+cache -> logger: info("Initializing cache")
+cache -> cache: startCacheCleanup()
+note right: Start background cleanup thread
+cache -> logger: success("Cache initialized")
+cache --> server: cache ready
+deactivate cache
+
 server -> limiter: new RateLimiter(maxRequests, timeWindow)
 server -> router: new Router(staticFolder)
 server -> logger: success("Server initialized")
 server --> main: server ready
-
 == Connection Handling Loop ==
 main -> server: start()
 activate server
 
 loop until shouldStop
+    alt Cache Cleanup (Background Thread)
+        cache -> cache: periodicCleanup()
+        activate cache
+        loop for each cache entry
+            cache -> cache: check expiration
+            alt expired
+                cache -> cache: remove entry
+                cache -> logger: debug("Removed expired entry")
+            end
+        end
+        cache -> logger: debug("Cache cleanup completed")
+        deactivate cache
+    end
+
     client -> socket: connection request
     socket -> epoll: event notification
     epoll -> server: new connection event
@@ -118,19 +139,26 @@ loop until shouldStop
             activate cache
             
             alt cache hit
-                cache --> router: cached content
-                router -> logger: info("Cache hit")
-                deactivate cache
-                
-                router -> Http: sendResponse(cached)
-                activate http
-                http -> compression: shouldCompress()
-                alt should compress
-                    http -> compression: process()
+                cache -> cache: check expiration
+                alt not expired
+                    cache --> router: cached content
+                    router -> logger: info("Cache hit")
+                    deactivate cache
+                    
+                    router -> Http: sendResponse(cached)
+                    activate http
+                    http -> compression: shouldCompress()
+                    alt should compress
+                        http -> compression: process()
+                    end
+                    http -> client: send response
+                    http --> router: response sent
+                    deactivate http
+                else expired
+                    cache -> cache: remove expired entry
+                    cache -> logger: debug("Cache entry expired")
+                    cache --> router: cache miss
                 end
-                http -> client: send response
-                http --> router: response sent
-                deactivate http
                 
             else cache miss
                 cache --> router: cache miss
@@ -168,29 +196,59 @@ loop until shouldStop
     deactivate server
     deactivate pool
 end
-
 == Server Shutdown ==
 [-> main: signal(SIGINT/SIGTERM)
 main -> server: stop()
+activate server
+
+server -> logger: warning("Initiating server shutdown")
 
 server -> socket: closeSocket()
+activate socket
+socket -> logger: info("Stopping accept socket")
+socket --> server: socket closed
+deactivate socket
+
 server -> pool: stop()
 activate pool
+pool -> logger: info("Stopping thread pool")
 pool -> pool: joinWorkers()
 pool --> server: workers stopped
 deactivate pool
 
+server -> cache: stopCacheCleanup()
+activate cache
+cache -> logger: info("Stopping cache cleanup")
+cache -> cache: join cleanup thread
+cache --> server: cleanup stopped
+deactivate cache
+
+server -> server: closeAllConnections()
+activate server
+loop for each active connection
+    server -> server: closeConnection(socket)
+    server -> logger: info("Connection closed")
+end
+deactivate server
+
 server -> epoll: cleanup()
+activate epoll
+epoll -> logger: info("Cleaning up epoll")
+epoll --> server: epoll cleaned
+deactivate epoll
+
 server -> logger: info("Server shutting down")
 server --> main: server stopped
+deactivate server
 
 main -> logger: destroyInstance()
 activate logger
+logger -> logger: flush remaining logs
+logger -> logger: close log file
 logger --> main: logger destroyed
 deactivate logger
 
-[<-- main: exit
-deactivate server
+[<-- main: exit(EXIT_SUCCESS)
 deactivate main
 
 @enduml

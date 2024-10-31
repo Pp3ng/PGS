@@ -91,6 +91,7 @@ package "Core Components" {
         - epoll: EpollWrapper
         - rateLimiter: RateLimiter
         - cache: Cache
+        - cacheCleanupThread: thread 
         + Server(int port, const string& staticFolder, int threadCount,\n int maxRequests, int timeWindow, int cacheSizeMB, int maxAgeSeconds)
         + start(): void
         + stop(): void
@@ -288,25 +289,27 @@ package "Utility Classes" {
 
 
     class Cache <<Utility>> {
-        - cache: unordered_map<string, CacheEntry>
-        - lruList: list<string>
-        - mutex: shared_mutex
-        - maxSize: size_t
-        - currentSize: size_t
-        - maxAge: chrono::seconds
-
-        + explicit Cache(size_t maxSizeMB, chrono::seconds maxAge)
-        + template<typename Vector> get(const string& key, Vector& data,\n string& mimeType, time_t& lastModified): bool
-        + template<typename Vector> set(const string& key, const Vector& data,\n const string& mimeType, time_t lastModified): void
-        + clear(): void
-        + remove(const string& key): bool
-        + exists(const string& key): bool
-        + size() const: size_t
-        + count() const: size_t
-        + getMaxAge() const: chrono::seconds
-        + setMaxAge(chrono::seconds newMaxAge): void
-        - updateLRU(const string& key): void
-    }
+    - cache: unordered_map<string, CacheEntry>
+    - lruList: list<string>
+    - mutex: shared_mutex
+    - maxSize: size_t
+    - currentSize: size_t
+    - maxAge: chrono::seconds
+    
+    + explicit Cache(size_t maxSizeMB, chrono::seconds maxAge)
+    + template<typename Vector> get(const string& key, Vector& data,\n string& mimeType, time_t& lastModified): bool
+    + template<typename Vector> set(const string& key, const Vector& data,\n const string& mimeType, time_t lastModified): void
+    + clear(): void
+    + remove(const string& key): bool
+    + exists(const string& key): bool
+    + size() const: size_t
+    + count() const: size_t
+    + getMaxAge() const: chrono::seconds
+    + setMaxAge(chrono::seconds newMaxAge): void
+    - updateLRU(const string& key): void
+    - cleanExpiredEntries(): void 
+    + periodicCleanup(): void
+}
     note right of Cache: Thread-safe LRU cache implementation\nwith size-based eviction,\nTTL support, and memory optimization\nusing shared mutex for concurrent access
 
     class RateLimiter <<Utility>> {

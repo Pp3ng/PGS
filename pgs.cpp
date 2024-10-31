@@ -74,7 +74,6 @@ struct ConnectionInfo
     bool isClosureLogged;                            // flag to track if connection closure is logged
     uint64_t bytesReceived;                          // bytes received from client
     uint64_t bytesSent;                              // bytes sent to client
-    std::vector<std::string> logBuffer;              // buffer for storing logs
 
     ConnectionInfo(const std::chrono::steady_clock::time_point &time,
                    const std::string &ipAddr, bool logged = false,
@@ -415,6 +414,39 @@ private:
         cache[key].lruIterator = lruList.begin(); // update iterator
     }
 
+    void cleanExpiredEntries()
+    {
+        std::unique_lock<std::shared_mutex> lock(mutex);
+        auto now = std::chrono::system_clock::now();
+
+        std::vector<std::string> expiredKeys;
+        for (auto it = cache.begin(); it != cache.end(); ++it)
+        {
+            auto entryAge = now - std::chrono::system_clock::from_time_t(it->second.lastModified);
+            if (entryAge > maxAge)
+            {
+                currentSize -= it->second.data.size();
+                lruList.erase(it->second.lruIterator);
+                expiredKeys.push_back(it->first);
+                Logger::getInstance()->info("Cache entry expired: " + it->first +
+                                            ", age: " + std::to_string(std::chrono::duration_cast<std::chrono::seconds>(entryAge).count()) +
+                                            "s, max age: " + std::to_string(maxAge.count()) + "s");
+            }
+        }
+
+        for (const auto &key : expiredKeys)
+        {
+            cache.erase(key);
+        }
+
+        if (!expiredKeys.empty())
+        {
+            Logger::getInstance()->info("Cleaned " + std::to_string(expiredKeys.size()) +
+                                        " expired cache entries, current cache size: " +
+                                        std::to_string(currentSize / (1024 * 1024)) + "MB");
+        }
+    }
+
 public:
     // constructor with overflow check - O(1)
     explicit Cache(size_t maxSizeMB, std::chrono::seconds maxAge)
@@ -437,6 +469,19 @@ public:
         auto it = cache.find(key);
         if (it != cache.end())
         {
+            auto now = std::chrono::system_clock::now();
+            auto entryAge = now - std::chrono::system_clock::from_time_t(it->second.lastModified);
+            if (entryAge > maxAge)
+            {
+                lock.unlock();
+                std::unique_lock<std::shared_mutex> uniqueLock(mutex);
+                currentSize -= it->second.data.size();
+                lruList.erase(it->second.lruIterator);
+                cache.erase(it);
+                Logger::getInstance()->info("Cache entry expired: " + key);
+                return false;
+            }
+
             data = Vector(std::make_move_iterator(it->second.data.begin()),
                           std::make_move_iterator(it->second.data.end()));
             mimeType = std::move(it->second.mimeType);
@@ -450,6 +495,19 @@ public:
         return false;
     }
 
+    void periodicCleanup()
+    {
+        auto start = std::chrono::steady_clock::now();
+        cleanExpiredEntries();
+        auto duration = std::chrono::steady_clock::now() - start;
+
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(duration).count() > 100)
+        {
+            Logger::getInstance()->warning("Cache cleanup took " +
+                                           std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(duration).count()) +
+                                           "ms");
+        }
+    }
     // add an item to cache - O(1) average case
     template <typename Vector>
     void set(std::string &&key, Vector &&data, std::string &&mimeType, time_t lastModified)
@@ -2321,9 +2379,12 @@ private:
     std::map<int, ConnectionInfo> connections; // map to store connection info
     std::atomic<bool> shouldStop{false};       // atomic flag to stop server
 
+    std::thread cacheCleanupThread;                                         // thread for cache cleanup
+    static constexpr auto CACHE_CLEANUP_INTERVAL = std::chrono::minutes(5); // 5 minutes
+
     void handleClient(int client_socket, const std::string &clientIp);
     void closeConnection(int client_socket);
-    void logRequest(int client_socket, const std::string &message);
+    void startCacheCleanup();
 };
 
 Server::Server(int port, const std::string &staticFolder, int threadCount,
@@ -2497,23 +2558,57 @@ void Server::stop()
     Logger::getInstance()->warning("Initiating server shutdown...");
     shouldStop = true;
 
-    socket.closeSocket(); // stop accepting new connections
+    // stop accepting new connections
+    socket.closeSocket();
 
-    pool.stop(); // stop worker threads
+    // stop thread pool
+    pool.stop();
 
-    // Close all existing connections
+    // close all existing connections
     std::vector<int> socketsToClose;
+    socketsToClose.reserve(connections.size()); // pre-allocate
+
     {
-        std::lock_guard<std::mutex> lock(connectionsMutex); // lock scope
+        std::lock_guard<std::mutex> lock(connectionsMutex);
         for (const auto &[client_socket, _] : connections)
         {
             socketsToClose.push_back(client_socket);
         }
     }
 
-    for (int sock : socketsToClose)
+    // close connections in parallel for large number of connections
+    static constexpr size_t PARALLEL_THRESHOLD = 1000;
+    if (socketsToClose.size() > PARALLEL_THRESHOLD)
     {
-        closeConnection(sock);
+        const size_t num_threads = std::thread::hardware_concurrency();
+        std::vector<std::thread> threads;
+        threads.reserve(num_threads);
+
+        const size_t chunk_size = socketsToClose.size() / num_threads;
+        for (size_t i = 0; i < num_threads; ++i)
+        {
+            size_t start = i * chunk_size;
+            size_t end = (i == num_threads - 1) ? socketsToClose.size() : (i + 1) * chunk_size;
+
+            threads.emplace_back([this, &socketsToClose, start, end]()
+                                 {
+                for (size_t j = start; j < end; ++j) {
+                    closeConnection(socketsToClose[j]);
+                } });
+        }
+
+        for (auto &thread : threads)
+        {
+            thread.join();
+        }
+    }
+    else
+    {
+        // sequential processing for small number of connections
+        for (int sock : socketsToClose)
+        {
+            closeConnection(sock);
+        }
     }
 
     Logger::getInstance()->info("All connections closed");
@@ -2521,25 +2616,29 @@ void Server::stop()
 
 void Server::handleClient(int client_socket, const std::string &clientIp)
 {
-    std::vector<char> buffer(1024); // initialize buffer for reading client data
-    ssize_t valread;                // variable to store number of bytes read
-    std::string request;            // string to accumulate complete client request
-    bool connectionClosed = false;  // flag to track if connection has been closed
+    // 1024 bytes is a good balance between memory usage and performance
+    std::vector<char> buffer(1024);
 
-    // read data from client in a loop
-    while ((valread = read(client_socket, buffer.data(), buffer.size())) > 0)
+    ssize_t valread;               // number of bytes read in each operation
+    std::string request;           // accumulates the complete client request
+    bool connectionClosed = false; // tracks if the connection has been closed
+
+    // read data from client in chunks using non-blocking recv
+    while ((valread = recv(client_socket, buffer.data(), buffer.size(), MSG_DONTWAIT)) > 0)
     {
-        // check if server should stop and while reading data
+        // check if server should stop during data reading
         if (shouldStop)
         {
             closeConnection(client_socket);
             return;
         }
 
-        // append read data to request string
+        // append the received data to the request string
+        // string will grow automatically as needed
         request.append(buffer.data(), valread);
 
-        // update bytes received for this connection
+        // update connection statistics under lock
+        // using minimal lock scope for better performance
         std::lock_guard<std::mutex> lock(connectionsMutex);
         auto it = connections.find(client_socket);
         if (it != connections.end())
@@ -2548,27 +2647,39 @@ void Server::handleClient(int client_socket, const std::string &clientIp)
         }
     }
 
-    // check if connection has been closed by client
-    if (valread == 0 ||
-        (valread < 0 && errno != EAGAIN && errno != EWOULDBLOCK))
+    // handle connection closure and errors
+    if (valread == 0)
     {
+        // connection closed by client (normal closure)
         closeConnection(client_socket);
         connectionClosed = true;
     }
+    else if (valread < 0)
+    {
+        // check for expected non-blocking errors
+        // EAGAIN/EWOULDBLOCK: No data available
+        // EINTR: Interrupted by signal
+        if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
+        {
+            closeConnection(client_socket);
+            connectionClosed = true;
+        }
+    }
 
-    // process request if connection is still open and we have received data
+    // process the request if connection is still open and we have data
     if (!connectionClosed && !request.empty())
     {
-        std::string path = Http::getRequestPath(request); // extract request path
-        bool isAsset = Http::isAssetRequest(path);        // check if it's an asset request
+        // extract request path and check if it's an asset request
+        std::string path = Http::getRequestPath(request);
+        bool isAsset = Http::isAssetRequest(path);
 
-        // log non-asset requests
+        // log only non-asset requests to reduce log volume
         if (!isAsset)
         {
-            logRequest(client_socket, "Processing request: " + path);
+            Logger::getInstance()->info("Processing request: " + path, clientIp);
         }
 
-        // apply rate limiting to request
+        // apply rate limiting to the request
         std::string processedRequest = rateLimiter.process(request);
 
         // check if request was rate limited
@@ -2578,30 +2689,30 @@ void Server::handleClient(int client_socket, const std::string &clientIp)
                                 "\r\n"
                                 "Too Many Requests")
         {
-            // send rate limit response to client
-            send(client_socket, processedRequest.c_str(), processedRequest.size(), 0);
+            // send rate limit response using MSG_NOSIGNAL to prevent SIGPIPE
+            send(client_socket, processedRequest.c_str(),
+                 processedRequest.size(), MSG_NOSIGNAL);
         }
         else
         {
-            // create a compression middleware instance
+            // process the request through compression middleware and router
             Compression compressionMiddleware;
-            // route request with compression middleware
-            router.route(path, client_socket, clientIp, &compressionMiddleware,
-                         &cache);
+            router.route(path, client_socket, clientIp,
+                         &compressionMiddleware, &cache);
         }
 
-        // log completion of non-asset requests
+        // log completion for non-asset requests
         if (!isAsset)
         {
-            logRequest(client_socket, "Request completed: " + path);
+            Logger::getInstance()->info("Request completed: " + path, clientIp);
         }
     }
 }
 
 void Server::closeConnection(int client_socket)
 {
-    std::lock_guard<std::mutex> lock(connectionsMutex); // lock scope
-    auto it = connections.find(client_socket);          // find client socket
+    std::lock_guard<std::mutex> lock(connectionsMutex);
+    auto it = connections.find(client_socket);
     if (it != connections.end())
     {
         if (!it->second.isClosureLogged)
@@ -2609,45 +2720,58 @@ void Server::closeConnection(int client_socket)
             auto duration = std::chrono::steady_clock::now() - it->second.startTime;
             std::string durationStr = Socket::durationToString(duration);
 
-            for (const auto &message :
-                 it->second.logBuffer) // log all buffered messages first
-            {
-                Logger::getInstance()->info(message, it->second.ip);
-            }
-
             Logger::getInstance()->info(
                 "Connection closed - Duration: " + durationStr +
                     ", Bytes received: " + std::to_string(it->second.bytesReceived) +
                     ", Bytes sent: " + std::to_string(it->second.bytesSent),
-                it->second.ip); // always log connection closure
+                it->second.ip);
 
             it->second.isClosureLogged = true;
         }
-        connections.erase(it); // erase connection info
+        connections.erase(it);
     }
 
-    try
-    {
-        epoll.remove(client_socket); // remove client socket from epoll
-    }
-    catch (const std::exception &e)
-    {
-        Logger::getInstance()->warning(
-            "Failed to remove client socket from epoll: " + std::string(e.what()));
-    }
-
+    epoll.remove(client_socket);
     close(client_socket);
 }
 
-void Server::logRequest(int client_socket, const std::string &message)
+void Server::startCacheCleanup()
 {
-    std::lock_guard<std::mutex> lock(connectionsMutex);
-    auto it = connections.find(client_socket); // find client socket
-    if (it != connections.end())
-        it->second.logBuffer.push_back(message);
-}
+    cacheCleanupThread = std::thread([this]()
+                                     {
+            pthread_setname_np(pthread_self(), "cache-cleanup");
+            
+            // set higher priority for cache cleanup thread
+            if (nice(10) == -1) {
+                Logger::getInstance()->warning("Failed to set cache cleanup thread priority");
+            }
 
-std::unique_ptr<Server> server; // instance of Server
+            while (!shouldStop) {
+                cache.periodicCleanup();
+                //wait for the next cleanup interval
+                std::mutex mtx;
+                std::unique_lock<std::mutex> lock(mtx);
+                std::condition_variable cv;
+                cv.wait_for(lock, CACHE_CLEANUP_INTERVAL, [this]() { 
+                    return shouldStop.load(); 
+                });
+            } });
+
+    // set to the last CPU core
+    int numCores = std::thread::hardware_concurrency();
+    if (numCores > 0)
+    {
+        cpu_set_t cpuset;
+        CPU_ZERO(&cpuset);
+        CPU_SET(numCores - 1, &cpuset);
+        int rc = pthread_setaffinity_np(cacheCleanupThread.native_handle(),
+                                        sizeof(cpu_set_t), &cpuset);
+        if (rc != 0)
+        {
+            Logger::getInstance()->warning("Failed to set cache cleanup thread affinity");
+        }
+    }
+}
 
 std::atomic<bool> running(true); // flag to control main loop
 
@@ -2658,40 +2782,64 @@ void signalHandler(int signum)
 
 auto main(void) -> int
 {
-    signal(SIGINT, signalHandler);
-    signal(SIGTERM, signalHandler);
+    // set up signal handlers with SA_RESTART flag
+    struct sigaction sa;
+    sa.sa_handler = signalHandler;
+    sa.sa_flags = SA_RESTART;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGINT, &sa, nullptr);
+    sigaction(SIGTERM, &sa, nullptr);
 
     try
     {
-        Config config =
-            Parser::parseConfig("pgs_conf.json"); // parse configuration file
-        server = std::make_unique<Server>(
-            config.port, config.staticFolder, config.threadCount,
-            config.rateLimit.maxRequests, config.rateLimit.timeWindow,
-            config.cache.sizeMB,
-            config.cache.maxAgeSeconds); // create server instance
+        Config config = Parser::parseConfig("pgs_conf.json");
 
-        std::thread serverThread(
-            [&]()
-            { server->start(); }); // start server in a separate thread
-
-        while (running)
+        // set higher priority for server process
+        if (nice(-10) == -1 && errno != 0)
         {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
+            Logger::getInstance()->warning("Failed to set process priority: " +
+                                           std::string(strerror(errno)));
         }
 
-        std::thread shutdownThread([&]()
-                                   { server->stop(); }); // initiate server shutdown in a separate thread
+        // create server instance
+        std::unique_ptr<Server> server = std::make_unique<Server>(
+            config.port,
+            config.staticFolder,
+            config.threadCount,
+            config.rateLimit.maxRequests,
+            config.rateLimit.timeWindow,
+            config.cache.sizeMB,
+            config.cache.maxAgeSeconds);
 
+        // pin server thread to first CPU core
+        cpu_set_t cpuset;
+        CPU_ZERO(&cpuset);
+        CPU_SET(0, &cpuset);
+
+        std::thread serverThread([&]()
+                                 { server->start(); });
+        pthread_setaffinity_np(serverThread.native_handle(), sizeof(cpu_set_t), &cpuset);
+
+        // main loop with shorter sleep time for more responsive shutdown
+        while (running)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+
+        // high priority shutdown thread
+        std::thread shutdownThread([&]()
+                                   {
+            pthread_setschedprio(pthread_self(), -10);
+            server->stop(); });
+
+        // join threads
         if (shutdownThread.joinable())
             shutdownThread.join();
-        else
-            Logger::getInstance()->error("Failed to join shutdown thread");
-
-        if (serverThread.joinable()) // join server thread
+        if (serverThread.joinable())
             serverThread.join();
-        else
-            Logger::getInstance()->error("Failed to join server thread");
+
+        // explicitly reset server to ensure proper cleanup
+        server.reset();
     }
     catch (const std::exception &e)
     {
@@ -2700,8 +2848,6 @@ auto main(void) -> int
     }
 
     Logger::getInstance()->info("Server shut down successfully");
-    server.reset();            // explicitly destroy server object
-    Logger::destroyInstance(); // destroy logger instance
-
+    Logger::destroyInstance();
     return EXIT_SUCCESS;
 }
