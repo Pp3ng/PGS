@@ -137,13 +137,24 @@ package "Core Components" {
 }
     note right of Router: Handles routing of HTTP requests\nto appropriate static files\nwith MIME type detection\nand 404 handling
 
-    class ThreadPool <<Core>> {
+class ThreadPool <<Core>> {
+    - {static} CACHE_LINE_SIZE: size_t
+    - {static} QUEUE_SIZE: size_t
+    - {static} MAX_STEAL_ATTEMPTS: size_t
+    - {static} SPIN_COUNT_MAX: size_t
+    
+    - LockFreeQueue<T>: class
+    - ThreadData: struct
+    - thread_data: vector<unique_ptr<ThreadData>>
     - workers: vector<thread>
-    - tasks: queue<function<void()>>
+    - global_queue: LockFreeQueue<function<void()>>
     - taskMutex: mutable shared_mutex
     - condition: condition_variable_any
     - stop_flag: atomic<bool>
     - active_threads: atomic<size_t>
+    - rd: thread_local static random_device
+    - gen: thread_local static mt19937
+    - dist: thread_local static uniform_int_distribution<size_t>
     
     + ThreadPool(size_t numThreads)
     + ~ThreadPool()
@@ -151,13 +162,14 @@ package "Core Components" {
     + ThreadPool& operator=(const ThreadPool&) = delete
     + template<typename F, typename... Args>\n enqueue(F&& f, Args&&... args): future<invoke_result_t<F, Args...>>
     + stop(): void
-    + threadCount() const: size_t
-    + queueSize() const: size_t
+    + get_active_threads() const: size_t
+    + get_thread_tasks_processed(size_t) const: size_t
     
-    - setThreadAffinity(pthread_t thread, size_t thread_id): bool
-    - start(size_t numThreads): void
+    - steal_task(function<void()>&, size_t): bool
+    - worker_thread(size_t): void
+    - setThreadAffinity(pthread_t, size_t): bool
 }
-note top of ThreadPool: Thread pool with read-write lock support\nfor optimized task queue access\nand CPU affinity management
+    note top of ThreadPool: High-performance thread pool with:\n- Lock-free queue implementation\n- Work stealing algorithm\n- Adaptive spinning\n- CPU affinity optimization\n- Thread-local task distribution\n- Performance monitoring
 
    class Http <<Core>> {
     - {static} const BUFFER_SIZE: size_t = 65536

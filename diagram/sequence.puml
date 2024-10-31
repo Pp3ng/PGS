@@ -1,5 +1,6 @@
 @startuml server-sequence
 
+scale 0.5
 skinparam responseMessageBelowArrow true
 skinparam maxMessageSize 150
 skinparam ParticipantPadding 40
@@ -62,9 +63,14 @@ deactivate epoll
 server -> pool: new ThreadPool(threadCount)
 activate pool
 pool -> logger: info("Initializing thread pool")
-pool -> pool: start(numThreads)
-pool -> pool: setThreadAffinity()
-pool -> logger: success("Thread pool initialized")
+pool -> pool: initialize thread local data
+note right: Create per-thread queues
+pool -> pool: start worker threads
+loop for each thread
+    pool -> pool: setThreadAffinity()
+    note right: Optimize CPU cache usage
+end
+pool -> logger: success("Thread pool initialized with work stealing")
 pool --> server: thread pool ready
 deactivate pool
 
@@ -93,10 +99,10 @@ loop until shouldStop
             cache -> cache: check expiration
             alt expired
                 cache -> cache: remove entry
-                cache -> logger: debug("Removed expired entry")
+                cache -> logger: info("Removed expired entry")
             end
         end
-        cache -> logger: debug("Cache cleanup completed")
+        cache -> logger: info("Cache cleanup completed")
         deactivate cache
     end
 
@@ -111,10 +117,45 @@ loop until shouldStop
     deactivate socket
     
     server -> pool: enqueue(handleClient)
-    activate pool
-    
-    pool -> server: handleClient(client_socket, clientIp)
-    activate server
+activate pool
+note right: Task enqueuing with work stealing support
+pool -> pool: distribute task to local queue
+note right: Round-robin distribution to thread-local queues
+
+alt local queue full
+    pool -> pool: fallback to global queue
+    note right: Global queue as overflow buffer
+end
+
+pool -> pool: notify waiting worker
+note right: Wake up worker thread if sleeping
+
+group Worker Thread Processing
+    pool -> pool: try local queue
+    alt local queue empty
+        pool -> pool: attempt work stealing
+        loop MAX_STEAL_ATTEMPTS times
+            pool -> pool: select random victims
+            alt steal successful
+                pool -> pool: execute stolen task
+                pool -> pool: reset steal attempts
+            else steal failed
+                pool -> pool: exponential backoff
+                pool -> pool: increment steal attempts
+            end
+        end
+        alt still no task
+            pool -> pool: check global queue
+            alt global queue empty
+                pool -> pool: adaptive spin or sleep
+            end
+        end
+    end
+end
+
+pool -> server: handleClient(client_socket, clientIp)
+deactivate pool
+activate server
     
     server -> server: readClientData()
     alt valid request received
@@ -156,7 +197,7 @@ loop until shouldStop
                     deactivate http
                 else expired
                     cache -> cache: remove expired entry
-                    cache -> logger: debug("Cache entry expired")
+                    cache -> logger: info("Cache entry expired")
                     cache --> router: cache miss
                 end
                 

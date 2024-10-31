@@ -44,6 +44,7 @@
 #include <unordered_set>      // unordered unique elements (Hash Table)
 #include <vector>             // dynamic array
 #include <zlib.h>             // zlib compression
+#include <random>             // random number generation
 
 namespace fs = std::filesystem; // Alias for filesystem namespace
 using json = nlohmann::json;    // Alias for JSON namespace
@@ -788,92 +789,333 @@ private:
 
 class ThreadPool
 {
-public:
-    // constructor: Initialize thread pool with specified number of threads
-    explicit ThreadPool(size_t numThreads) { start(numThreads); }
-
-    // destructor: Ensure proper cleanup of all threads
-    ~ThreadPool() { stop(); }
-
-    // Disable copy operations to prevent resource duplication
-    ThreadPool(const ThreadPool &) = delete;
-    ThreadPool &operator=(const ThreadPool &) = delete;
-
-    // Template method to submit tasks to the thread pool
-    // F: Function type
-    // Args: Function arguments pack
-    // Returns: std::future containing the result of the task
-    template <typename F, typename... Args>
-    auto enqueue(F &&f, Args &&...args)
-        -> std::future<typename std::invoke_result_t<F, Args...>>
-    {
-        using return_type = typename std::invoke_result_t<F, Args...>;
-
-        // Create a packaged task that will store the function and its arguments
-        auto task = std::make_shared<std::packaged_task<return_type()>>(
-            std::bind(std::forward<F>(f), std::forward<Args>(args)...));
-
-        // Get future from the task before potentially moving the task
-        std::future<return_type> res = task->get_future();
-        {
-            // Need exclusive lock for writing to task queue
-            std::unique_lock<std::shared_mutex> lock(taskMutex);
-            if (stop_flag)
-            {
-                throw std::runtime_error("Cannot enqueue on stopped ThreadPool");
-            }
-            tasks.emplace([task]()
-                          { (*task)(); });
-        }
-        condition.notify_one();
-        return res;
-    }
-
-    // Gracefully stop the thread pool
-    void stop()
-    {
-        {
-            std::unique_lock<std::shared_mutex> lock(taskMutex);
-            stop_flag = true;
-        }
-        condition.notify_all();
-
-        for (std::thread &worker : workers)
-        {
-            if (worker.joinable())
-            {
-                worker.join();
-            }
-        }
-
-        workers.clear();
-        std::queue<std::function<void()>> empty;
-        std::swap(tasks, empty);
-    }
-
 private:
-    std::vector<std::thread> workers;        // Container for worker threads
-    std::queue<std::function<void()>> tasks; // Task queue
-    mutable std::shared_mutex
-        taskMutex; // Read-write lock for protecting task queue
-    std::condition_variable_any
-        condition;                         // Condition variable that works with shared_mutex
-    std::atomic<bool> stop_flag{false};    // Flag to signal thread pool shutdown
-    std::atomic<size_t> active_threads{0}; // Counter for currently active threads
+    // performance optimization constants
+    static constexpr size_t CACHE_LINE_SIZE = 64;
+    static constexpr size_t QUEUE_SIZE = 1024; // Must be power of 2
+    static constexpr size_t MAX_STEAL_ATTEMPTS = 3;
+    static constexpr size_t SPIN_COUNT_MAX = 100;
 
-    // Set CPU affinity for a thread
+    // lock-free queue implementation for task storage and work stealing
+    template <typename T>
+    class LockFreeQueue
+    {
+    private:
+        // queue entry with cache line alignment to prevent false sharing
+        struct Entry
+        {
+            std::atomic<size_t> sequence;
+            T data;
+            explicit Entry() : sequence(0) {}
+        };
+
+        // cache line aligned members to prevent false sharing
+        alignas(CACHE_LINE_SIZE) Entry *buffer;
+        alignas(CACHE_LINE_SIZE) std::atomic<size_t> enqueuePos;
+        alignas(CACHE_LINE_SIZE) std::atomic<size_t> dequeuePos;
+        alignas(CACHE_LINE_SIZE) std::atomic<size_t> size_;
+        const size_t mask;
+
+    public:
+        // initialize queue with given capacity (must be power of 2)
+
+        explicit LockFreeQueue(size_t capacity = QUEUE_SIZE) : buffer(new Entry[capacity]),
+                                                               enqueuePos(0),
+                                                               dequeuePos(0),
+                                                               size_(0),
+                                                               mask(capacity - 1)
+        {
+            for (size_t i = 0; i < capacity; ++i)
+            {
+                buffer[i].sequence.store(i, std::memory_order_relaxed);
+            }
+        }
+
+        ~LockFreeQueue()
+        {
+            delete[] buffer;
+        }
+
+        // push element to queue using relaxed memory ordering where possible
+        bool push(T value)
+        {
+            size_t pos = enqueuePos.load(std::memory_order_relaxed);
+
+            for (;;)
+            {
+                Entry &entry = buffer[pos & mask];
+                size_t seq = entry.sequence.load(std::memory_order_acquire);
+                intptr_t diff = static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos);
+
+                if (diff == 0)
+                {
+                    if (enqueuePos.compare_exchange_weak(pos, pos + 1,
+                                                         std::memory_order_relaxed))
+                    {
+                        entry.data = std::move(value);
+                        entry.sequence.store(pos + 1, std::memory_order_release);
+                        size_.fetch_add(1, std::memory_order_relaxed);
+                        return true;
+                    }
+                }
+                else if (diff < 0)
+                {
+                    return false; // queue is full
+                }
+                else
+                {
+                    pos = enqueuePos.load(std::memory_order_relaxed);
+                }
+            }
+        }
+
+        // try to pop element from queue using acquire-release ordering
+        bool try_pop(T &value)
+        {
+            size_t pos = dequeuePos.load(std::memory_order_relaxed);
+
+            for (;;)
+            {
+                Entry &entry = buffer[pos & mask];
+                size_t seq = entry.sequence.load(std::memory_order_acquire);
+                intptr_t diff = static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos + 1);
+
+                if (diff == 0)
+                {
+                    if (dequeuePos.compare_exchange_weak(pos, pos + 1,
+                                                         std::memory_order_relaxed))
+                    {
+                        value = std::move(entry.data);
+                        entry.sequence.store(pos + mask + 1, std::memory_order_release);
+                        size_.fetch_sub(1, std::memory_order_relaxed);
+                        return true;
+                    }
+                }
+                else if (diff < 0)
+                {
+                    return false; // queue is empty
+                }
+                else
+                {
+                    pos = dequeuePos.load(std::memory_order_relaxed);
+                }
+            }
+        }
+
+        // get current size (approximate due to concurrent nature)
+        size_t size() const
+        {
+            return size_.load(std::memory_order_relaxed);
+        }
+
+        bool empty() const
+        {
+            return size() == 0;
+        }
+
+        // prevent copying of queue
+        LockFreeQueue(const LockFreeQueue &) = delete;
+        LockFreeQueue &operator=(const LockFreeQueue &) = delete;
+    };
+    // thread local data structure with work stealing queue
+    struct alignas(CACHE_LINE_SIZE) ThreadData
+    {
+        std::unique_ptr<LockFreeQueue<std::function<void()>>> local_queue; // thread's local task queue
+        size_t steal_attempts{0};                                          // counter for work stealing attempts
+        size_t id;                                                         // thread ID
+        std::atomic<size_t> tasks_processed{0};                            // statistics counter
+
+        explicit ThreadData(size_t thread_id) : local_queue(std::make_unique<LockFreeQueue<std::function<void()>>>()),
+                                                id(thread_id) {}
+    };
+
+    // member variables
+    std::vector<std::unique_ptr<ThreadData>> thread_data; // per-thread data
+    std::vector<std::thread> workers;                     // worker threads
+    LockFreeQueue<std::function<void()>> global_queue;    // global task queue for overflow
+    mutable std::shared_mutex taskMutex;                  // mutex for global queue synchronization
+    std::condition_variable_any condition;                // condition variable for thread waiting
+    std::atomic<bool> stop_flag{false};                   // flag to signal shutdown
+    std::atomic<size_t> active_threads{0};                // number of currently active threads
+
+    // thread local random number generation for work stealing
+    thread_local static std::random_device rd;
+    thread_local static std::mt19937 gen;
+    thread_local static std::uniform_int_distribution<size_t> dist;
+
+    // try to steal task from other threads
+    bool steal_task(std::function<void()> &task, size_t self_id)
+    {
+        // initialize random number generator for this thread
+        thread_local bool initialized = false;
+        if (!initialized)
+        {
+            gen.seed(rd());
+            initialized = true;
+        }
+
+        auto &attempts = thread_data[self_id]->steal_attempts;
+
+        // apply exponential backoff if too many steal attempts
+        if (attempts >= MAX_STEAL_ATTEMPTS)
+        {
+            std::this_thread::sleep_for(std::chrono::microseconds(1 << attempts));
+            attempts = 0;
+            return false;
+        }
+
+        // first try global queue
+        if (global_queue.try_pop(task))
+        {
+            attempts = 0;
+            return true;
+        }
+
+        // choose two random victims and steal from the one with more tasks
+        size_t victim1 = dist(gen) % thread_data.size();
+        size_t victim2 = dist(gen) % thread_data.size();
+
+        // avoid stealing from self
+        if (victim1 == self_id)
+            victim1 = (victim1 + 1) % thread_data.size();
+        if (victim2 == self_id)
+            victim2 = (victim2 + 1) % thread_data.size();
+
+        // choose victim with larger queue
+        size_t victim = victim1;
+        if (thread_data[victim2]->local_queue->size() >
+            thread_data[victim1]->local_queue->size())
+        {
+            victim = victim2;
+        }
+
+        // try to steal from chosen victim
+        if (thread_data[victim]->local_queue->try_pop(task))
+        {
+            attempts = 0;
+            return true;
+        }
+
+        attempts++;
+        return false;
+    }
+    // worker thread implementation with work stealing and adaptive spinning
+    void worker_thread(size_t id)
+    {
+        // set thread name and affinity for better performance
+        pthread_setname_np(pthread_self(), ("worker-" + std::to_string(id)).c_str());
+        if (!setThreadAffinity(pthread_self(), id))
+        {
+            Logger::getInstance()->warning("Thread affinity setting failed for worker-" + std::to_string(id));
+        }
+
+        const auto &local_data = thread_data[id];
+        std::function<void()> task;
+        size_t spin_count = 0;
+
+        while (!stop_flag.load(std::memory_order_relaxed))
+        {
+            bool got_task = false;
+
+            // try local queue first for better cache locality
+            if (local_data->local_queue->try_pop(task))
+            {
+                got_task = true;
+            }
+            // if local queue is empty, try work stealing
+            else if (steal_task(task, id))
+            {
+                got_task = true;
+            }
+            // adaptive spinning before checking global queue
+            else if (spin_count < SPIN_COUNT_MAX)
+            {
+                spin_count++;
+                std::this_thread::yield();
+                continue;
+            }
+            // finally, check global queue with condition variable
+            else
+            {
+                std::shared_lock<std::shared_mutex> lock(taskMutex);
+                condition.wait_for(
+                    lock,
+                    std::chrono::milliseconds(100),
+                    [this]
+                    {
+                        return stop_flag.load(std::memory_order_relaxed) ||
+                               global_queue.size() > 0;
+                    });
+
+                if (stop_flag.load(std::memory_order_relaxed) &&
+                    global_queue.size() == 0)
+                {
+                    return;
+                }
+
+                if (global_queue.size() > 0)
+                {
+                    // upgrade to unique lock for popping from global queue
+                    lock.unlock();
+                    std::unique_lock<std::shared_mutex> uniqueLock(taskMutex);
+                    if (global_queue.size() > 0 && global_queue.try_pop(task))
+                    {
+                        got_task = true;
+                    }
+                }
+            }
+
+            if (got_task)
+            {
+                spin_count = 0; // reset spin counter on successful task acquisition
+                active_threads.fetch_add(1, std::memory_order_relaxed);
+
+                // execute task with exception handling
+                try
+                {
+                    task();
+                    local_data->tasks_processed.fetch_add(1, std::memory_order_relaxed);
+                }
+                catch (const std::exception &e)
+                {
+                    Logger::getInstance()->error(
+                        "Thread pool task exception: " + std::string(e.what()));
+                }
+                catch (...)
+                {
+                    Logger::getInstance()->error(
+                        "Unknown exception in thread pool task");
+                }
+
+                active_threads.fetch_sub(1, std::memory_order_relaxed);
+            }
+            else
+            {
+                // if no task found, reset spin counter and sleep briefly
+                spin_count = 0;
+                std::this_thread::sleep_for(std::chrono::microseconds(100));
+            }
+        }
+    }
+
+    // set CPU affinity for worker threads to optimize cache usage
+    [[nodiscard]]
     bool setThreadAffinity(pthread_t thread, size_t thread_id)
     {
         const int num_cores = std::thread::hardware_concurrency();
         if (num_cores == 0)
+        {
             return false;
+        }
 
         cpu_set_t cpuset;
         CPU_ZERO(&cpuset);
 
+        // distribute threads across available cores
         const int cores_per_thread = std::max(1, num_cores / 4);
         const int base_core = (thread_id * cores_per_thread) % num_cores;
 
+        // set affinity for multiple cores per thread
         for (int i = 0; i < cores_per_thread; ++i)
         {
             CPU_SET((base_core + i) % num_cores, &cpuset);
@@ -882,77 +1124,130 @@ private:
         int rc = pthread_setaffinity_np(thread, sizeof(cpu_set_t), &cpuset);
         if (rc != 0)
         {
-            Logger::getInstance()->warning("Thread affinity setting failed: " +
-                                           std::string(strerror(rc)));
+            Logger::getInstance()->warning(
+                "Thread affinity setting failed: " + std::string(strerror(rc)));
             return false;
         }
         return true;
     }
 
-    // Initialize and start the thread pool
-    void start(size_t numThreads)
+public:
+    // initialize thread pool with specified number of threads
+    explicit ThreadPool(size_t numThreads)
     {
-        const int num_cores = std::thread::hardware_concurrency();
+        thread_data.reserve(numThreads);
         workers.reserve(numThreads);
 
-        for (size_t i = 0; i < numThreads; ++i)
+        const int num_cores = std::thread::hardware_concurrency();
+
+        // initialize thread local data for each worker
+        for (size_t i = 0; i < numThreads; i++)
+        {
+            thread_data.push_back(std::make_unique<ThreadData>(i));
+        }
+
+        // start worker threads
+        for (size_t i = 0; i < numThreads; i++)
         {
             workers.emplace_back([this, i]
-                                 {
-        pthread_setname_np(pthread_self(),
-                           ("worker-" + std::to_string(i)).c_str());
-        setThreadAffinity(pthread_self(), i);
-
-        while (true) {
-          std::function<void()> task;
-          {
-            // Use shared lock initially for reading
-            std::shared_lock<std::shared_mutex> lock(taskMutex);
-
-            auto waitResult = condition.wait_for(
-                lock, std::chrono::milliseconds(100),
-                [this] { return stop_flag || !tasks.empty(); });
-
-            if (stop_flag && tasks.empty()) {
-              return;
-            }
-
-            if (!tasks.empty()) {
-              // Upgrade to unique lock for task extraction
-              lock.unlock();
-              std::unique_lock<std::shared_mutex> uniqueLock(taskMutex);
-              if (!tasks.empty()) { // Check again after acquiring unique lock
-                task = std::move(tasks.front());
-                tasks.pop();
-              }
-            } else if (!waitResult) {
-              continue;
-            }
-          }
-
-          if (task) {
-            active_threads++;
-            try {
-              task();
-            } catch (const std::exception &e) {
-              Logger::getInstance()->error("Thread pool task exception: " +
-                                           std::string(e.what()));
-            } catch (...) {
-              Logger::getInstance()->error(
-                  "Unknown exception in thread pool task");
-            }
-            active_threads--;
-          }
-        } });
+                                 { worker_thread(i); });
         }
 
         Logger::getInstance()->success(
             "Thread pool initialized with " + std::to_string(numThreads) +
             " threads" +
             (num_cores > 0 ? " across " + std::to_string(num_cores) + " CPU cores"
-                           : " (CPU core count unknown)"));
+                           : " (CPU core count unknown)") +
+            " with work stealing enabled");
     }
+
+    // enqueue task with perfect forwarding and type erasure
+    template <typename F, typename... Args>
+    auto enqueue(F &&f, Args &&...args)
+        -> std::future<typename std::invoke_result_t<F, Args...>>
+    {
+        using return_type = typename std::invoke_result_t<F, Args...>;
+
+        // create packaged task
+        auto task = std::make_shared<std::packaged_task<return_type()>>(
+            std::bind(std::forward<F>(f), std::forward<Args>(args)...));
+
+        std::future<return_type> res = task->get_future();
+
+        // distribute tasks using thread-local counter for better locality
+        static thread_local size_t next_thread = 0;
+        next_thread = (next_thread + 1) % thread_data.size();
+
+        auto wrapped_task = [task]()
+        { (*task)(); };
+
+        // try local queue first, fall back to global queue if local is full
+        if (!thread_data[next_thread]->local_queue->push(wrapped_task))
+        {
+            std::unique_lock<std::shared_mutex> lock(taskMutex);
+            if (stop_flag)
+            {
+                throw std::runtime_error("Cannot enqueue on stopped ThreadPool");
+            }
+            if (!global_queue.push(wrapped_task))
+            {
+                throw std::runtime_error("Thread pool queue is full");
+            }
+        }
+
+        condition.notify_one();
+        return res;
+    }
+
+    // stop the thread pool and clean up resources
+    void stop()
+    {
+        {
+            std::unique_lock<std::shared_mutex> lock(taskMutex);
+            stop_flag = true;
+        }
+        condition.notify_all();
+
+        // join all worker threads
+        for (std::thread &worker : workers)
+        {
+            if (worker.joinable())
+            {
+                worker.join();
+            }
+        }
+
+        // clear all queues
+        std::function<void()> task;
+        while (global_queue.try_pop(task))
+        {
+        }
+        for (const auto &data : thread_data)
+        {
+            while (data->local_queue->try_pop(task))
+            { // clear local queues
+            }
+        }
+
+        workers.clear();
+        thread_data.clear();
+    }
+
+    // destructor ensures proper cleanup
+    ~ThreadPool()
+    {
+        stop();
+    }
+
+    // prevent copying
+    ThreadPool(const ThreadPool &) = delete;
+    ThreadPool &operator=(const ThreadPool &) = delete;
 };
+
+// initialize static members outside the class
+thread_local std::random_device ThreadPool::rd;
+thread_local std::mt19937 ThreadPool::gen;
+thread_local std::uniform_int_distribution<size_t> ThreadPool::dist;
 
 class Socket
 {
@@ -2587,12 +2882,12 @@ void Server::stop()
         const size_t chunk_size = socketsToClose.size() / num_threads;
         for (size_t i = 0; i < num_threads; ++i)
         {
-            size_t start = i * chunk_size;
+            size_t startPos = i * chunk_size;
             size_t end = (i == num_threads - 1) ? socketsToClose.size() : (i + 1) * chunk_size;
 
-            threads.emplace_back([this, &socketsToClose, start, end]()
+            threads.emplace_back([this, &socketsToClose, startPos, end]()
                                  {
-                for (size_t j = start; j < end; ++j) {
+                for (size_t j = startPos; j < end; ++j) {
                     closeConnection(socketsToClose[j]);
                 } });
         }
@@ -2739,23 +3034,26 @@ void Server::startCacheCleanup()
 {
     cacheCleanupThread = std::thread([this]()
                                      {
-            pthread_setname_np(pthread_self(), "cache-cleanup");
-            
-            // set higher priority for cache cleanup thread
-            if (nice(10) == -1) {
-                Logger::getInstance()->warning("Failed to set cache cleanup thread priority");
-            }
+        pthread_setname_np(pthread_self(), "cache-cleanup");
+        
+        // set higher priority for cache cleanup thread
+        if (nice(10) == -1) {
+            Logger::getInstance()->warning("Failed to set cache cleanup thread priority");
+        }
 
-            while (!shouldStop) {
-                cache.periodicCleanup();
-                //wait for the next cleanup interval
-                std::mutex mtx;
+        std::mutex mtx;
+        std::condition_variable cv;
+
+        while (!shouldStop) {
+            cache.periodicCleanup();
+            
+            {
                 std::unique_lock<std::mutex> lock(mtx);
-                std::condition_variable cv;
                 cv.wait_for(lock, CACHE_CLEANUP_INTERVAL, [this]() { 
                     return shouldStop.load(); 
                 });
-            } });
+            }
+        } });
 
     // set to the last CPU core
     int numCores = std::thread::hardware_concurrency();
