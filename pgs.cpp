@@ -380,17 +380,22 @@ private:
 
         CacheEntry() : lastModified(0) {}
 
-        // constructor for standard vector - O(n) for data copy
-        CacheEntry(const std::vector<char> &d, const std::string &m, time_t lm,
+        // constructor with move semantics for data and mimeType - O(1)
+        CacheEntry(std::vector<char> &&d, std::string &&m, time_t lm,
                    std::list<std::string>::iterator it)
-            : data(d), mimeType(m), lastModified(lm), lruIterator(it) {}
+            : data(std::move(d)), mimeType(std::move(m)), lastModified(lm), lruIterator(it) {}
 
-        // constructor for any vector-like container - O(n) for data copy
+        // constructor with perfect forwarding for data and mimeType - O(1)
         template <typename Vector>
-        CacheEntry(const Vector &d, const std::string &m, time_t lm,
+        CacheEntry(Vector &&d, std::string &&m, time_t lm,
                    std::list<std::string>::iterator it)
-            : data(d.begin(), d.end()), mimeType(m), lastModified(lm),
-              lruIterator(it) {}
+            : data(std::make_move_iterator(d.begin()),
+                   std::make_move_iterator(d.end())),
+              mimeType(std::move(m)), lastModified(lm), lruIterator(it) {}
+
+        // disable copy and assignment operations
+        CacheEntry(const CacheEntry &) = delete;
+        CacheEntry &operator=(const CacheEntry &) = delete;
     };
 
     std::unordered_map<std::string, CacheEntry>
@@ -426,30 +431,28 @@ public:
 
     // retrieve an item from cache - O(1) average case
     template <typename Vector>
-    bool get(const std::string &key, Vector &data, std::string &mimeType,
-             time_t &lastModified)
+    bool get(const std::string &key, Vector &data, std::string &mimeType, time_t &lastModified)
     {
         std::shared_lock<std::shared_mutex> lock(mutex);
         auto it = cache.find(key);
         if (it != cache.end())
         {
-            data.assign(it->second.data.begin(), it->second.data.end());
-            mimeType = it->second.mimeType;
+            data = Vector(std::make_move_iterator(it->second.data.begin()),
+                          std::make_move_iterator(it->second.data.end()));
+            mimeType = std::move(it->second.mimeType);
             lastModified = it->second.lastModified;
 
-            // update LRU order under exclusive lock
             lock.unlock();
             std::unique_lock<std::shared_mutex> uniqueLock(mutex);
             updateLRU(key);
             return true;
         }
-        return false; // cache miss
+        return false;
     }
 
-    // add or update an item in cache - O(1) average case
+    // add an item to cache - O(1) average case
     template <typename Vector>
-    void set(const std::string &key, const Vector &data,
-             const std::string &mimeType, time_t lastModified)
+    void set(std::string &&key, Vector &&data, std::string &&mimeType, time_t lastModified)
     {
         std::unique_lock<std::shared_mutex> lock(mutex);
 
@@ -477,12 +480,21 @@ public:
             lruList.pop_back();
         }
 
-        // add new entry to front of LRU list and cache
+        // add new entry to front of LRU list
         lruList.push_front(key);
+
         try
         {
-            cache.emplace(key,
-                          CacheEntry(data, mimeType, lastModified, lruList.begin()));
+            // emplace new entry into cache
+            cache.emplace(
+                std::piecewise_construct,
+                std::forward_as_tuple(std::move(key)),
+                std::forward_as_tuple(
+                    std::forward<Vector>(data),
+                    std::move(mimeType),
+                    lastModified,
+                    lruList.begin()));
+
             currentSize += data.size();
         }
         catch (const std::exception &e)
@@ -1372,11 +1384,11 @@ void Http::sendResponse(int client_socket, const std::string &filePath,
         totalBytesSent +=
             sendLargeFile(client_socket, fileGuard, fileSize, clientIp);
 
-        // Update cache if needed
         if (cache && statusCode == 200)
         {
-            updateCache(cache, filePath, mimeType, lastModified, fileGuard, fileSize,
-                        pool);
+            // Update cache if need
+            updateCache(cache, std::string(filePath), std::string(mimeType),
+                        lastModified, fileGuard, fileSize, pool);
         }
     }
 
@@ -1801,7 +1813,12 @@ void Http::updateCache(Cache *cache, const std::string &filePath,
         // Only update cache if we read the entire file
         if (totalRead == fileSize)
         {
-            cache->set(filePath, content, mimeType, lastModified);
+            // temporarily store the content in a string for move semantics
+            std::string keyTemp(filePath);
+            std::string mimeTemp(mimeType);
+            cache->set(std::move(keyTemp), std::move(content),
+                       std::move(mimeTemp), lastModified);
+
             Logger::getInstance()->info((
                 "set cache: " + filePath +
                 " cache size: " + std::to_string(cache->size()) +
