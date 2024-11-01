@@ -49,7 +49,7 @@ The server is built with a modular architecture, separating concerns into distin
 7. **Middleware**: Abstract class for request/response middleware.
 
    - **CompressionMiddleware**: Gzip compression middleware.
-   - **RateLimitMiddleware**: Rate limiting middleware.
+   - **RateLimitMiddleware**: Rate limiting middleware by Token Bucket algorithm.
 
 8. **Cache**: LRU cache for storing static file contents.
 
@@ -228,7 +228,7 @@ The server will:
 ## Future Improvements
 
 - [ ] Add SSL/TLS support
-- [ ] Implement caching mechanisms
+- [x] Implement caching mechanisms
 - [ ] Add support for dynamic content
 - [ ] Cross-platform compatibility
 - [ ] Configuration hot-reloading
