@@ -324,12 +324,14 @@ package "Utility Classes" {
     note right of Cache: Thread-safe LRU cache implementation\nwith size-based eviction,\nTTL support, and memory optimization\nusing shared mutex for concurrent access
 
     class RateLimiter <<Utility>> {
-        - maxRequests: size_t
-        - timeWindow: chrono::seconds
-        - clientRequests: unordered_map<string, deque<chrono::steady_clock::time_point>>
-        - rateMutex: mutex
-        + RateLimiter(size_t maxRequests, chrono::seconds timeWindow)
-        + process(const string& data) override: string
+          + RateLimiter(size_t maxRequests, std::chrono::seconds timeWindow)
+        + std::string process(const std::string &data) override
+        - const size_t maxTokens
+        - const double refillRate
+        - struct TokenBucket
+        - std::unordered_map<std::string, TokenBucket> clientBuckets
+        - std::mutex rateMutex
+        - static constexpr const char *RATE_LIMIT_RESPONSE
     }
 
     class Compression <<Utility>> {

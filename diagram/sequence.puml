@@ -1,10 +1,10 @@
 @startuml server-sequence
 
-scale 0.5
+scale 0.6
 skinparam responseMessageBelowArrow true
 skinparam maxMessageSize 150
-skinparam ParticipantPadding 40
-skinparam BoxPadding 20
+skinparam ParticipantPadding 60
+skinparam BoxPadding 30
 
 box "Client Side" #LightYellow
 participant "Client" as client
