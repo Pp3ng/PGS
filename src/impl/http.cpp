@@ -50,6 +50,7 @@ public:
     }
 };
 
+[[nodiscard]]
 bool Http::isAssetRequest(const std::string &path)
 {
     // cache string length to avoid multiple calls
@@ -366,6 +367,7 @@ bool Http::setupSocketOptions(int client_socket, int cork,
            setSocketOption(IPPROTO_TCP, TCP_CORK, &cork, sizeof(cork));
 }
 
+[[nodiscard]]
 bool Http::handleFileContent(FileGuard &fileGuard, const std::string &filePath,
                              size_t &fileSize, time_t &lastModified,
                              const std::string &clientIp)
@@ -460,6 +462,7 @@ bool Http::compressContent(Middleware *middleware, size_t fileSize,
     }
     return true;
 }
+
 [[nodiscard]]
 std::string Http::generateHeaders(int statusCode, const std::string &mimeType,
                                   size_t fileSize, time_t lastModified,

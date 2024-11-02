@@ -1,6 +1,6 @@
 @startuml server-sequence
 
-scale 0.6
+scale 0.7
 skinparam responseMessageBelowArrow true
 skinparam maxMessageSize 150
 skinparam ParticipantPadding 60
@@ -12,11 +12,14 @@ end box
 
 box "Server Core Components" #LightBlue
 participant "Main" as main
+participant "ServerThread" as sthread
+participant "ShutdownThread" as shutdown
 participant "Server" as server
 participant "Logger" as logger
 participant "Socket" as socket
 participant "EpollWrapper" as epoll
 participant "ThreadPool" as pool
+participant "WorkerThread" as worker
 participant "Router" as router
 participant "Http" as http
 participant "Cache" as cache
@@ -49,14 +52,29 @@ activate socket
 socket -> logger: info("Creating socket")
 socket -> socket: socket(AF_INET6, SOCK_STREAM, 0)
 socket -> socket: setSocketOptions()
+note right: SO_REUSEADDR | SO_REUSEPORT\nSO_SNDBUF | SO_RCVBUF
+socket -> socket: setNonBlocking()
 socket -> logger: success("Socket configured")
 socket --> server: socket ready
+deactivate socket
+
+server -> socket: bind()
+activate socket
+socket -> socket: bind to port
+socket -> logger: step(2, "Socket bound")
+socket --> server
+deactivate socket
+
+server -> socket: listen()
+activate socket
+socket -> socket: listen(SOMAXCONN)
+socket -> logger: step(3, "Listening")
+socket --> server
 deactivate socket
 
 server -> epoll: new EpollWrapper()
 activate epoll
 epoll -> epoll: epoll_create1(EPOLL_CLOEXEC)
-epoll -> epoll: add(socket_fd, EPOLLIN | EPOLLET)
 epoll --> server: epoll instance
 deactivate epoll
 
@@ -64,13 +82,40 @@ server -> pool: new ThreadPool(threadCount)
 activate pool
 pool -> logger: info("Initializing thread pool")
 pool -> pool: initialize thread local data
-note right: Create per-thread queues
-pool -> pool: start worker threads
-loop for each thread
-    pool -> pool: setThreadAffinity()
-    note right: Optimize CPU cache usage
+note right: Create per-thread work stealing queues
+
+create worker
+pool -> worker: start N worker threads
+activate worker
+worker -> worker: setThreadName("worker-N")
+worker -> worker: setThreadAffinity(N)
+note right: Pin each worker to specific CPU core
+
+loop until stop_flag
+    alt local_queue not empty
+        worker -> worker: process task from local queue
+    else try work stealing
+        loop for each other worker
+            worker -> worker: try_steal_task()
+            alt steal successful
+                worker -> worker: process stolen task
+                break
+            end
+        end
+    else try global queue
+        worker -> pool: try_pop from global_queue
+        alt got task
+            worker -> worker: process task
+        else
+            worker -> worker: sleep(100μs)
+        end
+    end
 end
-pool -> logger: success("Thread pool initialized with work stealing")
+
+worker --> pool: worker ready
+deactivate worker
+
+pool -> logger: success("Thread pool ready")
 pool --> server: thread pool ready
 deactivate pool
 
@@ -87,209 +132,176 @@ server -> limiter: new RateLimiter(maxRequests, timeWindow)
 server -> router: new Router(staticFolder)
 server -> logger: success("Server initialized")
 server --> main: server ready
-== Connection Handling Loop ==
-main -> server: start()
+
+create sthread
+main -> sthread: create & pin to CPU0
+activate sthread
+note right: Set thread affinity to CPU0\nfor optimal performance
+
+sthread -> server: start()
 activate server
+
+== Main Event Loop ==
+server -> server: initializeTimeouts()
+note right: Pre-allocate vectors for\ntimeout tracking
+
+server -> epoll: add(socket_fd, EPOLLIN)
+activate epoll
 
 loop until shouldStop
-    alt Cache Cleanup (Background Thread)
-        cache -> cache: periodicCleanup()
-        activate cache
-        loop for each cache entry
-            cache -> cache: check expiration
-            alt expired
-                cache -> cache: remove entry
-                cache -> logger: info("Removed expired entry")
-            end
-        end
-        cache -> logger: info("Cache cleanup completed")
-        deactivate cache
-    end
-
-    client -> socket: connection request
-    socket -> epoll: event notification
-    epoll -> server: new connection event
+    epoll -> epoll: wait(events, MAX_EVENTS, 100ms)
     
-    server -> socket: acceptConnection()
-    activate socket
-    socket -> logger: info("New connection")
-    socket --> server: client_socket, clientIp
-    deactivate socket
-    
-    server -> pool: enqueue(handleClient)
-activate pool
-note right: Task enqueuing with work stealing support
-pool -> pool: distribute task to local queue
-note right: Round-robin distribution to thread-local queues
-
-alt local queue full
-    pool -> pool: fallback to global queue
-    note right: Global queue as overflow buffer
-end
-
-pool -> pool: notify waiting worker
-note right: Wake up worker thread if sleeping
-
-group Worker Thread Processing
-    pool -> pool: try local queue
-    alt local queue empty
-        pool -> pool: attempt work stealing
-        loop MAX_STEAL_ATTEMPTS times
-            pool -> pool: select random victims
-            alt steal successful
-                pool -> pool: execute stolen task
-                pool -> pool: reset steal attempts
-            else steal failed
-                pool -> pool: exponential backoff
-                pool -> pool: increment steal attempts
-            end
-        end
-        alt still no task
-            pool -> pool: check global queue
-            alt global queue empty
-                pool -> pool: adaptive spin or sleep
-            end
+    alt system load is low
+        server -> server: checkIdleTimeouts()
+        note right: Check every 30s when\nnfds < MAX_EVENTS
+        
+        loop for each timed out connection
+            server -> server: closeConnection()
+            server -> logger: info("Timeout connection closed")
         end
     end
-end
-
-pool -> server: handleClient(client_socket, clientIp)
-deactivate pool
-activate server
     
-    server -> server: readClientData()
-    alt valid request received
-        server -> Http: getRequestPath(request)
-        activate http
-        http --> server: path
-        deactivate http
-        
-        server -> limiter: process(request)
-        activate limiter
-        
-        alt not rate limited
-            limiter --> server: processed request
-            deactivate limiter
+    alt epoll wait error
+        alt errno == EINTR
+            note right: Continue on interrupt
+        else
+            server -> logger: error("Epoll wait failed")
+            break
+        end
+    end
+    
+    loop for i = 0 to nfds
+        alt new connection (events[i].fd == server_socket)
+            server -> socket: acceptConnection()
+            activate socket
+            socket -> socket: accept()
+            socket -> socket: setNonBlocking()
+            socket -> logger: success("New connection from IP")
+            socket --> server: client_socket, clientIp
+            deactivate socket
             
-            server -> compression: new Compression()
-            server -> router: route(path, client_socket, clientIp, compression, cache)
-            activate router
+            server -> server: addConnectionInfo()
+            note right: Lock & update connections map
             
-            router -> Http: isAssetRequest(path)
-            router -> cache: get(path)
-            activate cache
+            server -> epoll: add(client_socket, EPOLLIN | EPOLLET)
+            note right: Edge-triggered mode
             
-            alt cache hit
-                cache -> cache: check expiration
-                alt not expired
-                    cache --> router: cached content
-                    router -> logger: info("Cache hit")
-                    deactivate cache
+        else existing connection
+            server -> server: getClientInfo()
+            note right: Lock & get connection info
+            
+            server -> pool: enqueue(handleClient)
+            activate worker
+            
+            worker -> server: handleClient()
+            activate server
+            
+            server -> server: readRequest()
+            note right: Non-blocking recv in chunks
+            
+            alt valid request
+                server -> Http: parseRequest()
+                server -> limiter: checkRateLimit()
+                
+                alt not rate limited
+                    server -> router: route()
+                    activate router
+                    router -> cache: tryGet()
                     
-                    router -> Http: sendResponse(cached)
-                    activate http
-                    http -> compression: shouldCompress()
-                    alt should compress
-                        http -> compression: process()
+                    alt cache hit
+                        cache --> router: cached response
+                        router -> compression: compress()
+                        router -> client: send response
+                    else cache miss
+                        router -> router: processRequest()
+                        router -> compression: compress()
+                        router -> cache: store()
+                        router -> client: send response
                     end
-                    http -> client: send response
-                    http --> router: response sent
-                    deactivate http
-                else expired
-                    cache -> cache: remove expired entry
-                    cache -> logger: info("Cache entry expired")
-                    cache --> router: cache miss
+                    deactivate router
+                else rate limited
+                    server -> client: send 429 response
                 end
-                
-            else cache miss
-                cache --> router: cache miss
-                router -> logger: info("Cache miss")
-                
-                router -> Http: sendResponse(file)
-                activate http
-                http -> compression: shouldCompress()
-                alt should compress
-                    http -> compression: process()
-                end
-                http -> http: sendHeaders()
-                http -> http: sendContent()
-                http -> cache: set(path, content)
-                http -> client: send response
-                http --> router: response sent
-                deactivate http
             end
             
-            router -> logger: info("Request completed")
-            router --> server: routing complete
-            deactivate router
-            
-        else rate limited
-            limiter --> server: 429 response
-            server -> logger: warning("Rate limited")
-            server -> client: send rate limit response
+            server -> logger: info("Request completed")
+            deactivate server
+            deactivate worker
         end
+    end
+end
+
+== Server Shutdown ==
+[-> main: SIGINT/SIGTERM
+main -> shutdown: create & set priority(-10)
+activate shutdown
+
+shutdown -> server: stop()
+activate server
+
+server -> logger: warning("Initiating shutdown")
+server -> shouldStop: set true
+server -> socket: closeSocket()
+server -> pool: stop()
+
+pool -> worker: notify all workers
+worker -> worker: finish remaining tasks
+worker --> pool: workers terminated
+
+server -> server: collectSocketsToClose()
+note right: Lock & gather all sockets
+
+alt connections > PARALLEL_THRESHOLD
+    server -> server: parallelClose()
+    note right: Create thread pool for\nparallel connection closing
+    
+    create "CloseThread[N]" as closeThread
+    server -> closeThread: start N threads
+    activate closeThread
+    
+    loop for each thread
+        closeThread -> server: closeConnection(chunk)
+        activate server
         
-    else invalid request
-        server -> logger: error("Invalid request")
+        server -> server: lock & update stats
+        server -> epoll: remove(socket)
+        server -> socket: close()
+        server -> logger: info("Connection closed")
+        
+        server --> closeThread
+        deactivate server
     end
     
-    server -> server: closeConnection()
-    deactivate server
-    deactivate pool
+    closeThread --> server: all connections closed
+    deactivate closeThread
+    
+else
+    loop for each socket
+        server -> server: closeConnection()
+        activate server
+        server -> server: lock & update stats
+        server -> epoll: remove(socket)
+        server -> socket: close()
+        server -> logger: info("Connection closed")
+        deactivate server
+    end
 end
-== Server Shutdown ==
-[-> main: signal(SIGINT/SIGTERM)
-main -> server: stop()
-activate server
 
-server -> logger: warning("Initiating server shutdown")
-
-server -> socket: closeSocket()
-activate socket
-socket -> logger: info("Stopping accept socket")
-socket --> server: socket closed
-deactivate socket
-
-server -> pool: stop()
-activate pool
-pool -> logger: info("Stopping thread pool")
-pool -> pool: joinWorkers()
-pool --> server: workers stopped
-deactivate pool
-
-server -> cache: stopCacheCleanup()
-activate cache
-cache -> logger: info("Stopping cache cleanup")
-cache -> cache: join cleanup thread
-cache --> server: cleanup stopped
-deactivate cache
-
-server -> server: closeAllConnections()
-activate server
-loop for each active connection
-    server -> server: closeConnection(socket)
-    server -> logger: info("Connection closed")
-end
+server -> logger: info("All connections closed")
+server --> shutdown: shutdown complete
 deactivate server
 
-server -> epoll: cleanup()
-activate epoll
-epoll -> logger: info("Cleaning up epoll")
-epoll --> server: epoll cleaned
-deactivate epoll
-
-server -> logger: info("Server shutting down")
-server --> main: server stopped
-deactivate server
+shutdown --> main: server stopped
+deactivate shutdown
 
 main -> logger: destroyInstance()
 activate logger
-logger -> logger: flush remaining logs
-logger -> logger: close log file
+logger -> logger: flush logs
+logger -> logger: close file
 logger --> main: logger destroyed
 deactivate logger
 
-[<-- main: exit(EXIT_SUCCESS)
+[<-- main: exit(0)
 deactivate main
 
 @enduml
