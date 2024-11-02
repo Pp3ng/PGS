@@ -1,6 +1,6 @@
 #include "compression.hpp"
 
-// Initialize static member variables
+// initialize static member variables
 const std::unordered_set<std::string> Compression::nonCompressibleTypes = {
     "image/png",
     "image/gif",
@@ -36,7 +36,7 @@ bool Compression::shouldCompress(const std::string &mimeType, size_t contentLeng
     return std::any_of(compressibleTypes.begin(), compressibleTypes.end(),
                        [&](const std::string &type)
                        {
-                           return mimeType.find(type) == 0; // Check for prefix match
+                           return mimeType.find(type) == 0; // check for prefix match
                        });
 }
 
