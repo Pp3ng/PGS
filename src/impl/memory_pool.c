@@ -7,6 +7,12 @@
 // round up a number to the nearest power of 2
 static inline size_t round_up_to_power_of_2(size_t x)
 {
+    if (0 == x)
+        return MIN_BLOCK_SIZE;
+    // improved overflow check with explicit size_t cast
+    if (x > (((size_t)1 << (sizeof(size_t) * 8 - 1))))
+        return 0;
+
     // decrement x to handle numbers that are already powers of 2
     // for example: if x is 16, we want to avoid rounding up to 32
     x--;
@@ -20,13 +26,13 @@ static inline size_t round_up_to_power_of_2(size_t x)
     x |= x >> 16; // set the next 16 bits
 
 // for 64-bit systems, we need to handle the upper 32 bits
-#if UINTPTR_MAX > 0xFFFFFFFF
+#if SIZE_MAX > 0xFFFFFFFF
     x |= x >> 32; // set the upper 32 bits on 64-bit systems
 #endif
 
-    // Add 1 to get the next power of 2
-    // All bits to the right of the highest set bit are now 1
-    // Adding 1 will carry over and give us the next power of a
+    // add 1 to get the next power of 2
+    // all bits to the right of the highest set bit are now 1
+    // adding 1 will carry over and give us the next power of a
     return x + 1;
 }
 
