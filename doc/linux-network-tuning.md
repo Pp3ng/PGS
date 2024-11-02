@@ -125,6 +125,8 @@ While these settings can improve performance, they should be balanced against se
 
 ## Additional Resources
 
+## Additional Resources
+
 - Linux kernel documentation: [/proc/sys/net documentation](https://www.kernel.org/doc/Documentation/networking/ip-sysctl.txt)
-- TCP/IP stack tuning guide
-- System monitoring tools documentation
+- TCP/IP stack tuning guide: [Red Hat Performance Tuning Guide](https://access.redhat.com/documentation/en-us/red_hat_enterprise_linux/7/html/performance_tuning_guide/sect-red_hat_enterprise_linux-performance_tuning_guide-networking-configuration_tools)
+- System monitoring tools documentation: [Linux Performance](https://www.brendangregg.com/linuxperf.html)

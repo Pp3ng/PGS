@@ -3,8 +3,8 @@
 scale 0.7
 skinparam responseMessageBelowArrow true
 skinparam maxMessageSize 150
-skinparam ParticipantPadding 60
-skinparam BoxPadding 30
+skinparam ParticipantPadding 80
+skinparam BoxPadding 40
 
 box "Client Side" #LightYellow
 participant "Client" as client
@@ -25,6 +25,7 @@ participant "Http" as http
 participant "Cache" as cache
 participant "RateLimiter" as limiter
 participant "Compression" as compression
+participant "MemoryPool" as mempool
 end box
 
 == Server Initialization ==
@@ -58,47 +59,38 @@ socket -> logger: success("Socket configured")
 socket --> server: socket ready
 deactivate socket
 
-server -> socket: bind()
-activate socket
-socket -> socket: bind to port
-socket -> logger: step(2, "Socket bound")
-socket --> server
-deactivate socket
-
-server -> socket: listen()
-activate socket
-socket -> socket: listen(SOMAXCONN)
-socket -> logger: step(3, "Listening")
-socket --> server
-deactivate socket
-
-server -> epoll: new EpollWrapper()
-activate epoll
-epoll -> epoll: epoll_create1(EPOLL_CLOEXEC)
-epoll --> server: epoll instance
-deactivate epoll
-
 server -> pool: new ThreadPool(threadCount)
 activate pool
 pool -> logger: info("Initializing thread pool")
 pool -> pool: initialize thread local data
-note right: Create per-thread work stealing queues
+note right: Create per-thread work stealing queues\nand memory pools
 
 create worker
 pool -> worker: start N worker threads
 activate worker
+
 worker -> worker: setThreadName("worker-N")
 worker -> worker: setThreadAffinity(N)
-note right: Pin each worker to specific CPU core
+worker -> mempool: get_thread_pool()
+activate mempool
+
+mempool -> mempool: create_thread_pool(1MB)
+note right: Initialize thread local memory pool\nwith buddy allocator
+mempool --> worker: thread local pool ready
+deactivate mempool
 
 loop until stop_flag
     alt local_queue not empty
         worker -> worker: process task from local queue
+        worker -> mempool: pool_allocate()
+        worker -> mempool: pool_deallocate()
     else try work stealing
         loop for each other worker
             worker -> worker: try_steal_task()
             alt steal successful
                 worker -> worker: process stolen task
+                worker -> mempool: pool_allocate()
+                worker -> mempool: pool_deallocate() 
                 break
             end
         end
@@ -106,6 +98,8 @@ loop until stop_flag
         worker -> pool: try_pop from global_queue
         alt got task
             worker -> worker: process task
+            worker -> mempool: pool_allocate()
+            worker -> mempool: pool_deallocate()
         else
             worker -> worker: sleep(100μs)
         end
@@ -119,28 +113,6 @@ pool -> logger: success("Thread pool ready")
 pool --> server: thread pool ready
 deactivate pool
 
-server -> cache: new Cache(sizeMB, maxAge)
-activate cache
-cache -> logger: info("Initializing cache")
-cache -> cache: startCacheCleanup()
-note right: Start background cleanup thread
-cache -> logger: success("Cache initialized")
-cache --> server: cache ready
-deactivate cache
-
-server -> limiter: new RateLimiter(maxRequests, timeWindow)
-server -> router: new Router(staticFolder)
-server -> logger: success("Server initialized")
-server --> main: server ready
-
-create sthread
-main -> sthread: create & pin to CPU0
-activate sthread
-note right: Set thread affinity to CPU0\nfor optimal performance
-
-sthread -> server: start()
-activate server
-
 == Main Event Loop ==
 server -> server: initializeTimeouts()
 note right: Pre-allocate vectors for\ntimeout tracking
@@ -151,86 +123,132 @@ activate epoll
 loop until shouldStop
     epoll -> epoll: wait(events, MAX_EVENTS, 100ms)
     
-    alt system load is low
-        server -> server: checkIdleTimeouts()
-        note right: Check every 30s when\nnfds < MAX_EVENTS
+    alt new connection
+        server -> socket: acceptConnection()
+        activate socket
+        socket -> socket: accept()
+        socket -> socket: setNonBlocking()
+        socket -> logger: success("New connection")
+        socket --> server: client_socket
+        deactivate socket
         
-        loop for each timed out connection
-            server -> server: closeConnection()
-            server -> logger: info("Timeout connection closed")
-        end
-    end
-    
-    alt epoll wait error
-        alt errno == EINTR
-            note right: Continue on interrupt
-        else
-            server -> logger: error("Epoll wait failed")
-            break
-        end
-    end
-    
-    loop for i = 0 to nfds
-        alt new connection (events[i].fd == server_socket)
-            server -> socket: acceptConnection()
-            activate socket
-            socket -> socket: accept()
-            socket -> socket: setNonBlocking()
-            socket -> logger: success("New connection from IP")
-            socket --> server: client_socket, clientIp
-            deactivate socket
+        server -> epoll: add(client_socket, EPOLLIN | EPOLLET)
+        
+    else existing connection
+        server -> pool: enqueue(handleClient)
+        activate worker
+        
+        worker -> mempool: get_thread_pool()
+        activate mempool
+        mempool --> worker: thread local pool
+        
+        worker -> server: handleClient()
+        activate server
+        
+        server -> server: readRequest()
+        note right: Using memory pool for buffers
+        
+        alt valid request
+            server -> Http: parseRequest()
+            activate http
+            http -> mempool: pool_allocate()
+            http -> router: route()
+            activate router
             
-            server -> server: addConnectionInfo()
-            note right: Lock & update connections map
-            
-            server -> epoll: add(client_socket, EPOLLIN | EPOLLET)
-            note right: Edge-triggered mode
-            
-        else existing connection
-            server -> server: getClientInfo()
-            note right: Lock & get connection info
-            
-            server -> pool: enqueue(handleClient)
-            activate worker
-            
-            worker -> server: handleClient()
-            activate server
-            
-            server -> server: readRequest()
-            note right: Non-blocking recv in chunks
-            
-            alt valid request
-                server -> Http: parseRequest()
-                server -> limiter: checkRateLimit()
-                
-                alt not rate limited
-                    server -> router: route()
-                    activate router
-                    router -> cache: tryGet()
-                    
-                    alt cache hit
-                        cache --> router: cached response
-                        router -> compression: compress()
-                        router -> client: send response
-                    else cache miss
-                        router -> router: processRequest()
-                        router -> compression: compress()
-                        router -> cache: store()
-                        router -> client: send response
-                    end
-                    deactivate router
-                else rate limited
-                    server -> client: send 429 response
-                end
+            router -> cache: tryGet()
+            alt cache hit
+                cache --> router: cached response
+                router -> compression: compress()
+                compression -> mempool: pool_allocate()
+                router -> client: send response
+                compression -> mempool: pool_deallocate()
+            else cache miss
+                router -> router: processRequest()
+                router -> mempool: pool_allocate()
+                router -> compression: compress()
+                router -> cache: store()
+                router -> client: send response
+                router -> mempool: pool_deallocate()
             end
             
-            server -> logger: info("Request completed")
-            deactivate server
-            deactivate worker
+            deactivate router
+            http -> mempool: pool_deallocate()
+            deactivate http
         end
+        
+        server -> logger: info("Request completed")
+        deactivate server
+        deactivate worker
+        deactivate mempool
     end
 end
 
+== Request Processing ==
+server -> worker: handleClient()
+activate worker
+
+worker -> mempool: get_thread_pool()
+activate mempool
+mempool --> worker: thread local pool
+deactivate mempool
+
+worker -> server: handleClient(socket, ip)
+activate server
+
+server -> server: readRequest()
+note right
+Using memory pool for:
+- Request buffer allocation
+- Connection info tracking
+end note
+
+server -> Http: parseRequest()
+activate http
+
+http -> mempool: pool_allocate()
+note right: Allocate memory for\nrequest parsing
+
+http -> router: route()
+activate router
+
+router -> cache: tryGet()
+alt cache hit
+    cache --> router: cached response
+    router -> compression: compress()
+    activate compression
+    compression -> mempool: pool_allocate()
+    note right: Allocate compression buffer
+    compression --> router: compressed data
+    deactivate compression
+    
+    router -> client: send response
+    router -> mempool: pool_deallocate()
+    note right: Free compression buffer
+else cache miss
+    router -> router: processRequest()
+    router -> mempool: pool_allocate()
+    note right: Allocate response buffer
+    
+    router -> compression: compress()
+    activate compression
+    compression -> mempool: pool_allocate()
+    compression --> router: compressed data
+    deactivate compression
+    
+    router -> cache: store()
+    router -> client: send response
+    router -> mempool: pool_deallocate()
+    note right: Free response & compression buffers
+end
+
+http -> mempool: pool_deallocate()
+note right: Free request parsing buffer
+deactivate http
+deactivate router
+
+server -> logger: info("Request completed")
+deactivate server
+deactivate worker
 == Server Shutdown ==
 [-> main: SIGINT/SIGTERM
 main -> shutdown: create & set priority(-10)
@@ -246,6 +264,8 @@ server -> pool: stop()
 
 pool -> worker: notify all workers
 worker -> worker: finish remaining tasks
+worker -> mempool: pool_deallocate()
+note right: Free remaining memory\nin thread local pool
 worker --> pool: workers terminated
 
 server -> server: collectSocketsToClose()
@@ -266,6 +286,8 @@ alt connections > PARALLEL_THRESHOLD
         server -> server: lock & update stats
         server -> epoll: remove(socket)
         server -> socket: close()
+        server -> mempool: destroy_thread_pool()
+        note right: Clean up thread local\nmemory pool
         server -> logger: info("Connection closed")
         
         server --> closeThread
@@ -282,6 +304,7 @@ else
         server -> server: lock & update stats
         server -> epoll: remove(socket)
         server -> socket: close()
+        server -> mempool: destroy_thread_pool()
         server -> logger: info("Connection closed")
         deactivate server
     end

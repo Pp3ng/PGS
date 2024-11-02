@@ -3,7 +3,7 @@
 
 #ifdef PGS_THREAD_POOL_HPP
 
-// LockFreeQueue implementations
+// lock-free queue implementations
 template <typename T>
 ThreadPool::LockFreeQueue<T>::LockFreeQueue(size_t capacity)
     : buffer(new Entry[capacity]),
@@ -102,15 +102,20 @@ bool ThreadPool::LockFreeQueue<T>::empty() const
     return size() == 0;
 }
 
-// ThreadPool enqueue implementation
+// thread pool enqueue implementation with memory pool support
 template <typename F, typename... Args>
 auto ThreadPool::enqueue(F &&f, Args &&...args)
     -> std::future<typename std::invoke_result_t<F, Args...>>
 {
     using return_type = typename std::invoke_result_t<F, Args...>;
 
+    // wrap the function to ensure it uses the thread's memory pool
     auto task = std::make_shared<std::packaged_task<return_type()>>(
-        std::bind(std::forward<F>(f), std::forward<Args>(args)...));
+        [f = std::forward<F>(f), ... args = std::forward<Args>(args)]() mutable
+        {
+            // task will execute in a thread with initialized memory pool
+            return f(std::forward<Args>(args)...);
+        });
 
     std::future<return_type> res = task->get_future();
 
@@ -125,11 +130,11 @@ auto ThreadPool::enqueue(F &&f, Args &&...args)
         std::unique_lock<std::shared_mutex> lock(taskMutex);
         if (stop_flag)
         {
-            throw std::runtime_error("Cannot enqueue on stopped ThreadPool");
+            throw std::runtime_error("cannot enqueue on stopped thread pool");
         }
         if (!global_queue.push(wrapped_task))
         {
-            throw std::runtime_error("Thread pool queue is full");
+            throw std::runtime_error("thread pool queue is full");
         }
     }
 

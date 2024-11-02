@@ -1,13 +1,25 @@
 #include "thread_pool.hpp"
 
-// Initialize static members
+// initialize static members
 thread_local std::random_device ThreadPool::rd;
 thread_local std::mt19937 ThreadPool::gen;
 thread_local std::uniform_int_distribution<size_t> ThreadPool::dist;
 
 ThreadPool::ThreadData::ThreadData(size_t thread_id)
     : local_queue(std::make_unique<LockFreeQueue<std::function<void()>>>()),
-      id(thread_id) {}
+      memory_pool(nullptr), // initialize memory pool as nullptr
+      id(thread_id)
+{
+}
+
+ThreadPool::ThreadData::~ThreadData()
+{
+    if (memory_pool)
+    {
+        destroy_thread_pool(memory_pool);
+        memory_pool = nullptr;
+    }
+}
 
 ThreadPool::ThreadPool(size_t numThreads)
 {
@@ -16,13 +28,13 @@ ThreadPool::ThreadPool(size_t numThreads)
 
     const int num_cores = std::thread::hardware_concurrency();
 
-    // Initialize thread local data for each worker
+    // initialize thread local data for each worker
     for (size_t i = 0; i < numThreads; i++)
     {
         thread_data.push_back(std::make_unique<ThreadData>(i));
     }
 
-    // Start worker threads
+    // start worker threads
     for (size_t i = 0; i < numThreads; i++)
     {
         workers.emplace_back([this, i]
@@ -30,11 +42,11 @@ ThreadPool::ThreadPool(size_t numThreads)
     }
 
     Logger::getInstance()->success(
-        "Thread pool initialized with " + std::to_string(numThreads) +
+        "thread pool initialized with " + std::to_string(numThreads) +
         " threads" +
         (num_cores > 0 ? " across " + std::to_string(num_cores) + " CPU cores"
                        : " (CPU core count unknown)") +
-        " with work stealing enabled");
+        " with work stealing and memory pool enabled");
 }
 
 bool ThreadPool::steal_task(std::function<void()> &task, size_t self_id)
@@ -92,10 +104,19 @@ void ThreadPool::worker_thread(size_t id)
     if (!setThreadAffinity(pthread_self(), id))
     {
         Logger::getInstance()->warning(
-            "Thread affinity setting failed for worker-" + std::to_string(id));
+            "thread affinity setting failed for worker-" + std::to_string(id));
     }
 
-    const auto &local_data = thread_data[id];
+    // initialize thread local memory pool
+    auto &local_data = thread_data[id];
+    local_data->memory_pool = get_thread_pool();
+    if (!local_data->memory_pool)
+    {
+        Logger::getInstance()->error(
+            "failed to initialize memory pool for worker-" + std::to_string(id));
+        return;
+    }
+
     std::function<void()> task;
     size_t spin_count = 0;
 
@@ -132,7 +153,7 @@ void ThreadPool::worker_thread(size_t id)
             if (stop_flag.load(std::memory_order_relaxed) &&
                 global_queue.size() == 0)
             {
-                return;
+                break;
             }
 
             if (global_queue.size() > 0)
@@ -153,18 +174,19 @@ void ThreadPool::worker_thread(size_t id)
 
             try
             {
+                // execute task with thread local memory pool available
                 task();
                 local_data->tasks_processed.fetch_add(1, std::memory_order_relaxed);
             }
             catch (const std::exception &e)
             {
                 Logger::getInstance()->error(
-                    "Thread pool task exception: " + std::string(e.what()));
+                    "thread pool task exception: " + std::string(e.what()));
             }
             catch (...)
             {
                 Logger::getInstance()->error(
-                    "Unknown exception in thread pool task");
+                    "unknown exception in thread pool task");
             }
 
             active_threads.fetch_sub(1, std::memory_order_relaxed);
@@ -174,6 +196,13 @@ void ThreadPool::worker_thread(size_t id)
             spin_count = 0;
             std::this_thread::sleep_for(std::chrono::microseconds(100));
         }
+    }
+
+    // cleanup thread local memory pool
+    if (local_data->memory_pool)
+    {
+        destroy_thread_pool(local_data->memory_pool);
+        local_data->memory_pool = nullptr;
     }
 }
 

@@ -177,7 +177,13 @@ The server will:
    - Reuses threads for better performance
    - Configurable thread count
 
-3. **Static File Serving**
+3. **Memory pool**
+
+   - buddy memory allocation
+   - reduce memory fragmentation
+   - auto merge free blocks
+
+4. **Static File Serving**
 
    - Efficient file reading (binary and text)
    - MIME type detection
@@ -185,13 +191,13 @@ The server will:
    - Compression support
    - Zero-copy file transfer (sendfile())
 
-4. **Rate Limiting**
+5. **Rate Limiting**
 
    - Prevents DDoS attacks
    - Configurable rate limits
    - Time window-based request tracking
 
-5. **Cache Mechanism**
+6. **Cache Mechanism**
 
    - Reduces disk I/O
    - Configurable cache size and age
@@ -231,6 +237,7 @@ The server will:
 - [x] Implement caching mechanisms
 - [ ] Add support for dynamic content
 - [ ] Cross-platform compatibility
+- [x] Buddy memory allocation
 - [ ] Configuration hot-reloading
 - [ ] Better error reporting and logging
 - [ ] Performance metrics and monitoring
