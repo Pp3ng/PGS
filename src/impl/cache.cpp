@@ -1,9 +1,16 @@
 #include "cache.hpp"
 
-// constructor with move semantics for data and mimeType - O(1)
+// constructor with move semantics
 Cache::CacheEntry::CacheEntry(std::vector<char> &&d, std::string &&m, time_t lm,
                               std::list<std::string>::iterator it)
-    : data(std::move(d)), mimeType(std::move(m)), lastModified(lm), lruIterator(it) {}
+    : data(std::move(d)),
+      mimeType(std::move(m)),
+      lastModified(lm),
+      cacheTime(std::chrono::system_clock::to_time_t(
+          std::chrono::system_clock::now())), // set cache time to current time
+      lruIterator(it)
+{
+}
 
 // constructor with overflow check - O(1)
 Cache::Cache(size_t maxSizeMB, std::chrono::seconds maxAge)
@@ -28,23 +35,29 @@ void Cache::updateLRU(const std::string &key)
 void Cache::cleanExpiredEntries()
 {
     std::unique_lock<std::shared_mutex> lock(mutex);
-    auto now = std::chrono::system_clock::now();
+
+    time_t now = std::chrono::system_clock::to_time_t(
+        std::chrono::system_clock::now());
 
     std::vector<std::string> expiredKeys;
     for (auto it = cache.begin(); it != cache.end(); ++it)
     {
-        auto entryAge = now - std::chrono::system_clock::from_time_t(it->second.lastModified);
-        if (entryAge > maxAge)
+        // calculate age based on cache time instead of last modified time
+        time_t age = now - it->second.cacheTime;
+
+        if (age > maxAge.count())
         {
+            expiredKeys.push_back(it->first);
             currentSize -= it->second.data.size();
             lruList.erase(it->second.lruIterator);
-            expiredKeys.push_back(it->first);
-            Logger::getInstance()->info("Cache entry expired: " + it->first +
-                                        ", age: " + std::to_string(std::chrono::duration_cast<std::chrono::seconds>(entryAge).count()) +
-                                        "s, max age: " + std::to_string(maxAge.count()) + "s");
+
+            Logger::getInstance()->info(
+                "Cache entry expired: " + it->first +
+                ", age: " + std::to_string(age) +
+                "s, max age: " + std::to_string(maxAge.count()) + "s");
         }
     }
-
+    // remove expired entries
     for (const auto &key : expiredKeys)
     {
         cache.erase(key);
@@ -52,9 +65,10 @@ void Cache::cleanExpiredEntries()
 
     if (!expiredKeys.empty())
     {
-        Logger::getInstance()->info("Cleaned " + std::to_string(expiredKeys.size()) +
-                                    " expired cache entries, current cache size: " +
-                                    std::to_string(currentSize / (1024 * 1024)) + "MB");
+        Logger::getInstance()->info(
+            "Cleaned " + std::to_string(expiredKeys.size()) +
+            " expired cache entries, current cache size: " +
+            std::to_string(currentSize / (1024 * 1024)) + "MB");
     }
 }
 

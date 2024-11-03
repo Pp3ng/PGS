@@ -11,17 +11,18 @@ private:
     struct CacheEntry
     {
         std::vector<char> data;                       // actual content of cached file
-        std::string mimeType;                         // MIME type of cached content
+        std::string mimeType;                         // mime type of cached content
         time_t lastModified;                          // last modification time of file
-        std::list<std::string>::iterator lruIterator; // iterator pointing to key's position in LRU list
+        time_t cacheTime;                             // time when entry was added to cache
+        std::list<std::string>::iterator lruIterator; // iterator pointing to key's position in lru list
 
-        CacheEntry() : lastModified(0) {}
+        CacheEntry() : lastModified(0), cacheTime(0) {}
 
-        // constructor with move semantics for data and mimeType - O(1)
+        // constructor with move semantics for data and mimetype
         CacheEntry(std::vector<char> &&d, std::string &&m, time_t lm,
                    std::list<std::string>::iterator it);
 
-        // constructor with perfect forwarding for data and mimeType - O(1)
+        // constructor with perfect forwarding for data and mimetype
         template <typename Vector>
         CacheEntry(Vector &&d, std::string &&m, time_t lm,
                    std::list<std::string>::iterator it);

@@ -416,7 +416,7 @@ void Server::handleClient(int client_socket, const std::string &clientIp)
             // reuse compression middleware instance per thread
             static thread_local Compression compressionMiddleware;
             router.route(path, client_socket, clientIp,
-                         &compressionMiddleware, &cache);
+                         &compressionMiddleware, &cache,request);
         }
 
         // log completion for non-asset requests

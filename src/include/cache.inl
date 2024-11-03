@@ -9,7 +9,13 @@ Cache::CacheEntry::CacheEntry(Vector &&d, std::string &&m, time_t lm,
                               std::list<std::string>::iterator it)
     : data(std::make_move_iterator(d.begin()),
            std::make_move_iterator(d.end())),
-      mimeType(std::move(m)), lastModified(lm), lruIterator(it) {}
+      mimeType(std::move(m)),
+      lastModified(lm),
+      cacheTime(std::chrono::system_clock::to_time_t(
+          std::chrono::system_clock::now())), // set cache time to current time
+      lruIterator(it)
+{
+}
 
 // retrieve an item from cache - O(1) average case
 template <typename Vector>
@@ -23,7 +29,7 @@ bool Cache::get(const std::string &key, Vector &data, std::string &mimeType, tim
         return false;
     }
 
-    // Copy the cached data and metadata first
+    // copy the cached data and metadata first
     try
     {
         data.reserve(it->second.data.size());
@@ -37,15 +43,15 @@ bool Cache::get(const std::string &key, Vector &data, std::string &mimeType, tim
         return false;
     }
 
-    // Update LRU list under exclusive lock
+    // update LRU list under exclusive lock
     readLock.unlock();
     std::unique_lock<std::shared_mutex> writeLock(mutex);
 
-    // Re-check if entry still exists after lock switch
+    // re-check if entry still exists after lock switch
     it = cache.find(key);
     if (it != cache.end())
     {
-        // Move entry to front of LRU list
+        // move entry to front of LRU list
         lruList.erase(it->second.lruIterator);
         lruList.push_front(key);
         it->second.lruIterator = lruList.begin();
@@ -55,21 +61,21 @@ bool Cache::get(const std::string &key, Vector &data, std::string &mimeType, tim
     return false;
 }
 
-// add an item to cache - O(1) average case
+// add an item to cache - o(1) average case
 template <typename Vector>
 void Cache::set(std::string &&key, Vector &&data, std::string &&mimeType, time_t lastModified)
 {
     if (data.size() > maxSize)
     {
-        return; // Don't cache if too large
+        return; // don't cache if too large
     }
 
     std::unique_lock<std::shared_mutex> lock(mutex);
 
-    // Store key copy for lookup
+    // store key copy for lookup
     const std::string keyCopy = key;
 
-    // Remove existing entry if present
+    // remove existing entry if present
     auto it = cache.find(keyCopy);
     if (it != cache.end())
     {
@@ -78,7 +84,7 @@ void Cache::set(std::string &&key, Vector &&data, std::string &&mimeType, time_t
         cache.erase(it);
     }
 
-    // Ensure space available
+    // ensure space available
     const size_t requiredSize = data.size();
     while (!lruList.empty() && currentSize + requiredSize > maxSize)
     {
@@ -92,14 +98,15 @@ void Cache::set(std::string &&key, Vector &&data, std::string &&mimeType, time_t
         lruList.pop_back();
     }
 
-    // Add new entry
+    // add new entry
     try
     {
-        // Add to LRU first
+        // add to lru first
         lruList.push_front(keyCopy);
         auto lruIt = lruList.begin();
 
-        // Then add to cache
+        // then add to cache
+        // cachetime will be set automatically in the cacheentry constructor
         cache.emplace(
             std::piecewise_construct,
             std::forward_as_tuple(std::move(key)),
@@ -113,12 +120,12 @@ void Cache::set(std::string &&key, Vector &&data, std::string &&mimeType, time_t
     }
     catch (const std::exception &e)
     {
-        // Rollback on failure
+        // rollback on failure
         if (!lruList.empty())
         {
             lruList.pop_front();
         }
-        Logger::getInstance()->error("Cache allocation failed: " + std::string(e.what()));
+        Logger::getInstance()->error("cache allocation failed: " + std::string(e.what()));
     }
 }
 

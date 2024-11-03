@@ -56,17 +56,17 @@ bool Http::isAssetRequest(const std::string &path)
     // cache string length to avoid multiple calls
     const size_t pathLen = path.length();
     if (pathLen < 4)
-        return false; // Minimum length for an asset (.css)
+        return false; // minimum length for an asset (.css)
 
     // convert last 10 chars (max extension length) to lowercase once
     // this avoids converting the entire path
-    alignas(8) char lastChars[10]; // Aligned for better memory access
+    alignas(8) char lastChars[10]; // aligned for better memory access
     const size_t checkLen = std::min(pathLen, size_t(10));
     std::transform(path.end() - checkLen, path.end(), lastChars, ::tolower);
 
     std::string_view lastView(lastChars, checkLen);
 
-    // Most common image types and web assets first (ordered by frequency)
+    // most common image types and web assets first (ordered by frequency)
     static constexpr std::array<std::string_view, 16> commonExts = {
         ".jpg", ".png", ".gif", // most frequent image types
         ".jpeg", ".webp",       // less frequent image types
@@ -156,54 +156,105 @@ std::string Http::getRequestPath(const std::string &request)
     size_t pos1 = request.find("GET ");
     size_t pos2 = request.find(" HTTP/");
     if (pos1 == std::string::npos ||
-        pos2 == std::string::npos) // Check if request is valid
+        pos2 == std::string::npos) // check if request is valid
     {
         return "/";
     }
     return request.substr(pos1 + 4, pos2 - (pos1 + 4));
 }
 
+[[nodiscard]]
+bool Http::handleClientCache(int client_socket, const std::string &request,
+                             time_t lastModified, const std::string &mimeType,
+                             const std::string &filePath, const std::string &clientIp,
+                             std::chrono::steady_clock::time_point startTime)
+{
+    if (checkClientCache(request, lastModified))
+    {
+        std::string headerStr = generateHeaders(304, mimeType, 0, lastModified, false);
+        send(client_socket, headerStr.c_str(), headerStr.size(), MSG_NOSIGNAL);
+
+        auto endTime = std::chrono::steady_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
+            endTime - startTime);
+
+        Logger::getInstance()->info(
+            "[" + clientIp + "] Response sent: " +
+            "status=304, path=" + filePath +
+            ", cache=CLIENT" +
+            ", time=" + std::to_string(duration.count()) + "µs" +
+            ", bytes=" + std::to_string(headerStr.size()));
+        return true;
+    }
+    return false;
+}
+
 void Http::sendResponse(int client_socket, const std::string &filePath,
                         const std::string &mimeType, int statusCode,
                         const std::string &clientIp, bool isIndex,
-                        Middleware *middleware, Cache *cache)
+                        Middleware *middleware, Cache *cache,
+                        const std::string &request)
 {
-    // Create a memory resource for this request
-    std::pmr::monotonic_buffer_resource pool(64 * 1024); // 64KB initial size
-
-    // Performance metrics
+    std::pmr::monotonic_buffer_resource pool(64 * 1024);
     auto startTime = std::chrono::steady_clock::now();
     size_t totalBytesSent = 0;
 
-    // Socket options
     int cork = 1;
     SocketOptionGuard sockGuard(cork, client_socket);
 
-    // Set socket options including TCP_CORK
     if (!setupSocketOptions(client_socket, cork, clientIp))
     {
         return;
     }
 
-    // File content and cache handling
     std::pmr::vector<char> fileContent{&pool};
     size_t fileSize;
-    time_t lastModified;
+    time_t lastModified = 0;
     bool cacheHit = false;
 
-    // Try to get content from cache
-    if (cache && statusCode == 200)
+    struct stat file_stat;
+    if (stat(filePath.c_str(), &file_stat) == 0)
     {
-        std::string cachedMimeType;
-        cacheHit = cache->get(filePath, fileContent, cachedMimeType, lastModified);
-        if (cacheHit)
+        lastModified = file_stat.st_mtime;
+
+        if (handleClientCache(client_socket, request, lastModified,
+                              mimeType, filePath, clientIp, startTime))
         {
-            fileSize = fileContent.size();
-            Logger::getInstance()->info("Cache hit for: " + filePath, clientIp);
+            return;
         }
     }
 
-    // Handle file if not in cache
+    // try to get content from cache
+    if (cache && statusCode == 200) [[likely]]
+    {
+        std::pmr::vector<char> cachedContent{&pool};
+        std::string cachedMimeType;
+        time_t cachedLastModified;
+
+        if (cache->get(filePath, cachedContent, cachedMimeType, cachedLastModified))
+        {
+            cacheHit = true;
+            std::string headerStr = generateHeaders(statusCode, cachedMimeType,
+                                                    cachedContent.size(),
+                                                    cachedLastModified, false);
+
+            totalBytesSent = sendWithWritev(client_socket, headerStr,
+                                            std::pmr::string{&pool},
+                                            cachedContent, false, true, clientIp);
+            auto endTime = std::chrono::steady_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
+                endTime - startTime);
+
+            Logger::getInstance()->info(
+                "Cache hit sent: " + filePath +
+                    ", size=" + std::to_string(cachedContent.size()) +
+                    ", time=" + std::to_string(duration.count()) + "µs",
+                clientIp);
+            return;
+        }
+    }
+
+    // handle uncached content
     FileGuard fileGuard;
     if (!cacheHit)
     {
@@ -213,8 +264,7 @@ void Http::sendResponse(int client_socket, const std::string &filePath,
             return;
         }
     }
-
-    // Compression handling
+    // compression handling
     bool isCompressed = false;
     std::pmr::string compressedContent{&pool};
 
@@ -230,32 +280,32 @@ void Http::sendResponse(int client_socket, const std::string &filePath,
         }
     }
 
-    // Generate response headers
+    // generate response headers
     std::string headerStr = generateHeaders(statusCode, mimeType, fileSize,
                                             lastModified, isCompressed);
 
-    // Send headers and content using writev
+    // send headers and content using writev
     totalBytesSent +=
         sendWithWritev(client_socket, headerStr, compressedContent, fileContent,
                        isCompressed, cacheHit, clientIp);
 
-    // Handle large file transfer and caching
+    // handle large file transfer and caching
     if (!isCompressed && !cacheHit && fileGuard.get() != -1)
     {
-        // Read file content once for both sending and caching
+        // read file content once for both sending and caching
         std::pmr::vector<char> content{&pool};
         content.reserve(fileSize);
         bool readSuccess = false;
 
-        // Try to read entire file into memory
+        // try to read entire file into memory
         if (lseek(fileGuard.get(), 0, SEEK_SET) != -1)
         {
-            // Use aligned buffer for optimal read performance
+            // use aligned buffer for optimal read performance
             std::unique_ptr<char[]> alignedBuffer(
                 new (std::align_val_t{ALIGNMENT}) char[BUFFER_SIZE]);
             size_t totalRead = 0;
 
-            // Read file in chunks
+            // read file in chunks
             while (totalRead < fileSize)
             {
                 ssize_t bytesRead = read(fileGuard.get(), alignedBuffer.get(),
@@ -271,10 +321,10 @@ void Http::sendResponse(int client_socket, const std::string &filePath,
             readSuccess = (totalRead == fileSize);
         }
 
-        // If successfully read the file, send content and update cache
+        // if successfully read the file, send content and update cache
         if (readSuccess)
         {
-            // Send file content with retry logic
+            // send file content with retry logic
             size_t sent = 0;
             const char *data = content.data();
             size_t remaining = content.size();
@@ -286,7 +336,7 @@ void Http::sendResponse(int client_socket, const std::string &filePath,
                 {
                     if (errno == EAGAIN || errno == EWOULDBLOCK)
                     {
-                        // Retry after short delay
+                        // retry after short delay
                         std::this_thread::sleep_for(std::chrono::microseconds(1000));
                         continue;
                     }
@@ -299,7 +349,7 @@ void Http::sendResponse(int client_socket, const std::string &filePath,
             }
             totalBytesSent += sent;
 
-            // Update cache if needed
+            // update cache
             if (cache && statusCode == 200)
             {
                 std::string keyTemp(filePath);
@@ -315,12 +365,12 @@ void Http::sendResponse(int client_socket, const std::string &filePath,
         }
         else
         {
-            // Fallback to sendLargeFile if reading fails
+            // fallback to sendLargeFile if reading fails
             totalBytesSent += sendLargeFile(client_socket, fileGuard, fileSize, clientIp);
         }
     }
 
-    // Record performance metrics
+    // record performance metrics
     auto endTime = std::chrono::steady_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
         endTime - startTime);
@@ -368,22 +418,51 @@ bool Http::setupSocketOptions(int client_socket, int cork,
 }
 
 [[nodiscard]]
+bool Http::checkClientCache(const std::string &request, time_t lastModified)
+{
+    // find if-modified-since header
+    size_t pos = request.find("If-Modified-Since: ");
+    if (pos == std::string::npos)
+    {
+        return false;
+    }
+
+    // parse the date
+    pos += 19; // length of "If-Modified-Since: "
+    size_t endPos = request.find("\r\n", pos);
+    if (endPos == std::string::npos)
+    {
+        return false;
+    }
+
+    std::string dateStr = request.substr(pos, endPos - pos);
+    struct tm tm = {};
+    if (strptime(dateStr.c_str(), "%a, %d %b %Y %H:%M:%S GMT", &tm) == nullptr)
+    {
+        return false;
+    }
+
+    time_t clientCacheTime = timegm(&tm);
+    return clientCacheTime >= lastModified;
+}
+
+[[nodiscard]]
 bool Http::handleFileContent(FileGuard &fileGuard, const std::string &filePath,
                              size_t &fileSize, time_t &lastModified,
                              const std::string &clientIp)
 {
-    // Open file with O_DIRECT for large files to bypass system cache
+    // open file with O_DIRECT for large files to bypass system cache
     int flags = O_RDONLY;
     struct stat statBuf;
     if (stat(filePath.c_str(), &statBuf) == 0 &&
-        statBuf.st_size > 10 * 1024 * 1024) // 10MB threshold
+        statBuf.st_size > 10 * 1024 * 1024) // 10mb threshold
     {
         flags |= O_DIRECT;
     }
 
     int fd = open(filePath.c_str(), flags);
     if (fd == -1 &&
-        errno == EINVAL) // O_DIRECT not supported, fallback to normal open
+        errno == EINVAL) // o_direct not supported, fallback to normal open
     {
         fd = open(filePath.c_str(), O_RDONLY);
     }
@@ -396,7 +475,7 @@ bool Http::handleFileContent(FileGuard &fileGuard, const std::string &filePath,
     }
     fileGuard.reset(fd);
 
-    // Advise kernel about access pattern for optimal I/O performance
+    // advise kernel about access pattern for optimal I/O performance
     posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
 
     struct stat file_stat;
@@ -427,7 +506,7 @@ bool Http::compressContent(Middleware *middleware, size_t fileSize,
     }
     else
     {
-        // Use aligned buffer with RAII
+        // use aligned buffer with RAII
         struct AlignedBuffer
         {
             void *ptr;
@@ -468,15 +547,15 @@ std::string Http::generateHeaders(int statusCode, const std::string &mimeType,
                                   size_t fileSize, time_t lastModified,
                                   bool isCompressed)
 {
-    // Pre-allocate header string capacity
+    // pre-allocate header string capacity
     std::string headerStr;
-    headerStr.reserve(1024); // Reserve reasonable space for headers
+    headerStr.reserve(1024); // reserve reasonable space for headers
 
-    // Generate time strings
+    // generate time strings
     char timeBuffer[128], lastModifiedBuffer[128];
     time_t now = time(nullptr);
     struct tm tmBuf;
-    const struct tm *tm_info = gmtime_r(&now, &tmBuf); // Thread-safe version
+    const struct tm *tm_info = gmtime_r(&now, &tmBuf); // thread-safe version
     strftime(timeBuffer, sizeof(timeBuffer), "%a, %d %b %Y %H:%M:%S GMT",
              tm_info);
 
@@ -484,7 +563,7 @@ std::string Http::generateHeaders(int statusCode, const std::string &mimeType,
     strftime(lastModifiedBuffer, sizeof(lastModifiedBuffer),
              "%a, %d %b %Y %H:%M:%S GMT", tm_info);
 
-    // Status message lookup using array for better performance
+    // status message lookup using array for better performance
     static const char *const STATUS_MESSAGES[] = {
         "OK",                    // 200
         nullptr,                 // 201-299
@@ -516,7 +595,7 @@ std::string Http::generateHeaders(int statusCode, const std::string &mimeType,
         statusMessage = "Unknown Status";
     }
 
-    // Assemble response headers using string
+    // assemble response headers using string
     headerStr = "HTTP/1.1 " + std::to_string(statusCode) + " " + statusMessage +
                 "\r\n"
                 "Server: RobustHTTP/1.0\r\n"
@@ -557,16 +636,16 @@ size_t Http::sendWithWritev(int client_socket, const std::string &headerStr,
                             bool isCompressed, bool cacheHit,
                             const std::string &clientIp)
 {
-    // Optimize writev using maximum allowed iovec structures
+    // optimize writev using maximum allowed iovec structures
     std::array<struct iovec, MAX_IOV> iov;
     int iovcnt = 0;
 
-    // Add header to iovec
+    // add header to iovec
     iov[iovcnt].iov_base = const_cast<char *>(headerStr.c_str());
     iov[iovcnt].iov_len = headerStr.size();
     iovcnt++;
 
-    // Add content to iovec if compressed or cached
+    // add content to iovec if compressed or cached
     if (isCompressed)
     {
         iov[iovcnt].iov_base = const_cast<char *>(compressedContent.c_str());
@@ -580,7 +659,7 @@ size_t Http::sendWithWritev(int client_socket, const std::string &headerStr,
         iovcnt++;
     }
 
-    // Send headers and content using writev with retry logic
+    // send headers and content using writev with retry logic
     size_t totalSent = 0;
     const size_t totalSize =
         headerStr.size() + (isCompressed ? compressedContent.size()
@@ -603,7 +682,7 @@ size_t Http::sendWithWritev(int client_socket, const std::string &headerStr,
         }
         totalSent += sent;
 
-        // Update iovec structures with zero-copy approach
+        // update iovec structures with zero-copy approach
         while (sent > 0 && iovcnt > 0)
         {
             if (static_cast<size_t>(sent) >= iov[0].iov_len)
@@ -627,11 +706,75 @@ size_t Http::sendWithWritev(int client_socket, const std::string &headerStr,
 size_t Http::sendLargeFile(int client_socket, const FileGuard &fileGuard,
                            size_t fileSize, const std::string &clientIp)
 {
+    static constexpr size_t SMALL_FILE_THRESHOLD = 64 * 1024;      // 64kb
+    static constexpr size_t SENDFILE_THRESHOLD = 10 * 1024 * 1024; // 10mb
+
+    // send file using optimal method based on file size
+    if (fileSize < SMALL_FILE_THRESHOLD) [[unlikely]]
+    {
+        return sendWithRead(client_socket, fileGuard, fileSize, clientIp);
+    }
+    else if (fileSize < SENDFILE_THRESHOLD) [[likely]]
+    {
+        return sendWithSendfile(client_socket, fileGuard, fileSize, clientIp);
+    }
+    else
+    {
+        return sendWithMmap(client_socket, fileGuard, fileSize, clientIp);
+    }
+}
+
+[[nodiscard]]
+size_t Http::sendWithRead(int client_socket, const FileGuard &fileGuard,
+                          size_t fileSize, const std::string &clientIp)
+{
+    // aligned buffer for optimal read performance
+    std::unique_ptr<char[]> buffer(new (std::align_val_t{ALIGNMENT}) char[BUFFER_SIZE]);
+    size_t totalSent = 0;
+
+    while (totalSent < fileSize)
+    {
+        // read data
+        size_t toRead = std::min(BUFFER_SIZE, fileSize - totalSent);
+        ssize_t bytesRead = pread(fileGuard.get(), buffer.get(), toRead, totalSent);
+        if (bytesRead <= 0)
+            break;
+
+        // send data
+        size_t bytesSent = 0;
+        while (bytesSent < static_cast<size_t>(bytesRead))
+        {
+            ssize_t sent = send(client_socket,
+                                buffer.get() + bytesSent,
+                                bytesRead - bytesSent,
+                                MSG_NOSIGNAL);
+
+            if (sent == -1)
+            {
+                if (errno == EAGAIN || errno == EWOULDBLOCK)
+                {
+                    std::this_thread::sleep_for(std::chrono::microseconds(100));
+                    continue;
+                }
+                Logger::getInstance()->error(
+                    "Failed to send data: " + std::string(strerror(errno)),
+                    clientIp);
+                return totalSent + bytesSent;
+            }
+            bytesSent += sent;
+        }
+        totalSent += bytesSent;
+    }
+    return totalSent;
+}
+
+[[nodiscard]]
+size_t Http::sendWithSendfile(int client_socket, const FileGuard &fileGuard,
+                              size_t fileSize, const std::string &clientIp)
+{
     size_t totalSent = 0;
     off_t offset = 0;
-    bool useMmap = false;
 
-    // Try sendfile with optimal chunk size and retry logic
     while (offset < static_cast<off_t>(fileSize))
     {
         size_t chunk = std::min(SENDFILE_CHUNK, fileSize - offset);
@@ -641,80 +784,77 @@ size_t Http::sendLargeFile(int client_socket, const FileGuard &fileGuard,
         {
             if (errno == EAGAIN || errno == EWOULDBLOCK)
             {
-                std::this_thread::sleep_for(
-                    std::chrono::microseconds(1000)); // 1ms sleep
-                continue;                             // retry
+                std::this_thread::sleep_for(std::chrono::microseconds(100));
+                continue;
             }
-            else if (errno == EINVAL || errno == ENOSYS)
+            if (errno == EINVAL || errno == ENOSYS) [[unlikely]]
             {
-                useMmap = true;
-                break;
+                // fallback to mmap if sendfile is not supported
+                return sendWithMmap(client_socket, fileGuard, fileSize, clientIp);
             }
             Logger::getInstance()->error(
-                "Failed to send file: errno=" + std::to_string(errno), clientIp);
+                "Sendfile failed: " + std::string(strerror(errno)),
+                clientIp);
             return totalSent;
-        }
-        else if (sent == 0)
-        {
-            break;
         }
         totalSent += sent;
     }
+    return totalSent;
+}
 
-    // Fall back to mmap for large files with huge pages support
-    if (useMmap)
+[[nodiscard]]
+size_t Http::sendWithMmap(int client_socket, const FileGuard &fileGuard,
+                          size_t fileSize, const std::string &clientIp)
+{
+    int flags = MAP_PRIVATE;
+    if (fileSize >= 2 * 1024 * 1024) [[unlikely]] // 2mb threshold
     {
-        int flags = MAP_PRIVATE;
-        if (fileSize >= 2 * 1024 * 1024) // 2MB threshold for huge pages
+        flags |= MAP_HUGETLB;
+    }
+
+    void *mmapAddr = mmap(nullptr, fileSize, PROT_READ, flags, fileGuard.get(), 0);
+    if (mmapAddr == MAP_FAILED && (flags & MAP_HUGETLB))
+    {
+        flags &= ~MAP_HUGETLB;
+        mmapAddr = mmap(nullptr, fileSize, PROT_READ, flags, fileGuard.get(), 0);
+    }
+
+    if (mmapAddr == MAP_FAILED)
+    {
+        Logger::getInstance()->error(
+            "Mmap failed: " + std::string(strerror(errno)),
+            clientIp);
+        return 0;
+    }
+
+    MMapGuard mmapGuard(mmapAddr, fileSize);
+
+    madvise(mmapAddr, fileSize, MADV_SEQUENTIAL | MADV_WILLNEED);
+
+    const char *fileContent = static_cast<const char *>(mmapAddr);
+    size_t totalSent = 0;
+
+    while (totalSent < fileSize)
+    {
+        size_t chunk = std::min(BUFFER_SIZE, fileSize - totalSent);
+        ssize_t sent = send(client_socket,
+                            fileContent + totalSent,
+                            chunk,
+                            MSG_NOSIGNAL | MSG_MORE);
+
+        if (sent == -1)
         {
-            flags |= MAP_HUGETLB;
-        }
-
-        void *mmapAddr =
-            mmap(nullptr, fileSize, PROT_READ, flags, fileGuard.get(), 0);
-        if (mmapAddr == MAP_FAILED && (flags & MAP_HUGETLB))
-        {
-            flags &= ~MAP_HUGETLB;
-            mmapAddr = mmap(nullptr, fileSize, PROT_READ, flags, fileGuard.get(), 0);
-        }
-
-        if (mmapAddr == MAP_FAILED)
-        {
-            Logger::getInstance()->error(
-                "Mmap failed: errno=" + std::to_string(errno), clientIp);
-            return totalSent;
-        }
-
-        // RAII for mmap
-        MMapGuard mmapGuard(mmapAddr, fileSize);
-        madvise(mmapAddr, fileSize, MADV_SEQUENTIAL);
-
-        const char *fileContent = static_cast<const char *>(mmapAddr);
-        size_t remainingBytes = fileSize;
-        size_t bytesSent = 0;
-
-        while (remainingBytes > 0)
-        {
-            size_t chunk = std::min(BUFFER_SIZE, remainingBytes);
-            ssize_t sent =
-                send(client_socket, fileContent + bytesSent, chunk, MSG_NOSIGNAL);
-            if (sent == -1)
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
             {
-                if (errno == EAGAIN || errno == EWOULDBLOCK)
-                {
-                    std::this_thread::sleep_for(
-                        std::chrono::microseconds(1000)); // 1ms sleep
-                    continue;                             // retry
-                }
-                Logger::getInstance()->error("Failed to send mmap data: errno=" +
-                                                 std::to_string(errno),
-                                             clientIp);
-                return totalSent + bytesSent;
+                std::this_thread::sleep_for(std::chrono::microseconds(100));
+                continue;
             }
-            bytesSent += sent;
-            remainingBytes -= sent;
+            Logger::getInstance()->error(
+                "Failed to send mmap data: " + std::string(strerror(errno)),
+                clientIp);
+            break;
         }
-        totalSent += bytesSent;
+        totalSent += sent;
     }
 
     return totalSent;

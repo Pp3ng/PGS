@@ -14,7 +14,8 @@ public:
                              const std::string &mimeType, int statusCode,
                              const std::string &clientIp, bool isIndex = false,
                              Middleware *middleware = nullptr,
-                             Cache *cache = nullptr);
+                             Cache *cache = nullptr,
+                             const std::string &request = "");
     [[nodiscard]] static bool isAssetRequest(const std::string &path);
 
 private:
@@ -62,6 +63,21 @@ private:
                                                const std::string &clientIp);
     [[nodiscard]] static size_t sendLargeFile(int client_socket, const FileGuard &fileGuard,
                                               size_t fileSize, const std::string &clientIp);
+    [[nodiscard]] static size_t sendWithSendfile(int client_socket, const FileGuard &fileGuard,
+                                                 size_t fileSize, const std::string &clientIp);
+    [[nodiscard]] static size_t sendWithRead(int client_socket, const FileGuard &fileGuard,
+                                             size_t fileSize, const std::string &clientIp);
+    [[nodiscard]] static size_t sendWithMmap(int client_socket, const FileGuard &fileGuard,
+                                             size_t fileSize, const std::string &clientIp);
+    [[nodiscard]] static bool checkClientCache(const std::string &request,
+                                               time_t lastModified);
+    [[nodiscard]] static bool handleClientCache(int client_socket,
+                                                const std::string &request,
+                                                time_t lastModified,
+                                                const std::string &mimeType,
+                                                const std::string &filePath,
+                                                const std::string &clientIp,
+                                                std::chrono::steady_clock::time_point startTime);
 };
 
 #endif // PGS_HTTP_HPP

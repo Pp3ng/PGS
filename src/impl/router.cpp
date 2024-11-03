@@ -1,7 +1,5 @@
 #include "router.hpp"
 
-#include "router.hpp"
-
 Router::Router(const std::string &staticFolder)
     : staticFolder(staticFolder)
 {
@@ -87,7 +85,7 @@ std::string Router::getMimeType(const std::string &path)
 
 void Router::route(const std::string &path, int client_socket,
                    const std::string &clientIp, Middleware *middleware,
-                   Cache *cache)
+                   Cache *cache, const std::string &request)
 {
     // pre-allocate string capacity to avoid reallocation
     // +11 accounts for potential "/index.html" addition
@@ -206,5 +204,5 @@ void Router::route(const std::string &path, int client_socket,
     // send the response using the optimized http::sendresponse method
     // the !isasset && isindex parameter determines whether to log the response
     Http::sendResponse(client_socket, filePath, mimeType, 200, clientIp,
-                       !isAsset && isIndex, middleware, cache);
+                       !isAsset && isIndex, middleware, cache, request);
 }

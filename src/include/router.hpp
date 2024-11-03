@@ -15,7 +15,8 @@ public:
     explicit Router(const std::string &staticFolder);
 
     void route(const std::string &path, int client_socket,
-               const std::string &clientIp, Middleware *middleware, Cache *cache);
+               const std::string &clientIp, Middleware *middleware,
+               Cache *cache, const std::string &request);
 
 private:
     std::string staticFolder;                                       // path to static files
