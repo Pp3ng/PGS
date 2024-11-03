@@ -65,14 +65,20 @@ private:
     std::atomic<bool> stop_flag{false};
     std::atomic<size_t> active_threads{0};
 
-    // thread local random number generation
-    thread_local static std::random_device rd;
-    thread_local static std::mt19937 gen;
-    thread_local static std::uniform_int_distribution<size_t> dist;
-
     bool steal_task(std::function<void()> &task, size_t self_id);
     void worker_thread(size_t id);
     [[nodiscard]] bool setThreadAffinity(pthread_t thread, size_t thread_id);
+
+    struct ThreadLocalRandomData
+    {
+        std::random_device rd;
+        std::mt19937 gen{rd()};
+        std::uniform_int_distribution<size_t> dist{};
+    };
+
+    thread_local static ThreadLocalRandomData random_data;
+
+    static_assert((QUEUE_SIZE & (QUEUE_SIZE - 1)) == 0, "QUEUE_SIZE must be power of 2");
 
 public:
     explicit ThreadPool(size_t numThreads);

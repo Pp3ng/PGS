@@ -1,9 +1,7 @@
 #include "thread_pool.hpp"
 
 // initialize static members
-thread_local std::random_device ThreadPool::rd;
-thread_local std::mt19937 ThreadPool::gen;
-thread_local std::uniform_int_distribution<size_t> ThreadPool::dist;
+thread_local ThreadPool::ThreadLocalRandomData ThreadPool::random_data;
 
 ThreadPool::ThreadData::ThreadData(size_t thread_id)
     : local_queue(std::make_unique<LockFreeQueue<std::function<void()>>>()),
@@ -51,35 +49,28 @@ ThreadPool::ThreadPool(size_t numThreads)
 
 bool ThreadPool::steal_task(std::function<void()> &task, size_t self_id)
 {
-    thread_local bool initialized = false;
-    if (!initialized)
-    {
-        gen.seed(rd());
-        initialized = true;
-    }
+    auto &attemps = thread_data[self_id]->steal_attempts;
 
-    auto &attempts = thread_data[self_id]->steal_attempts;
-
-    if (attempts >= MAX_STEAL_ATTEMPTS)
+    if (attemps >= thread_data.size())
     {
-        std::this_thread::sleep_for(std::chrono::microseconds(1 << attempts));
-        attempts = 0;
+        std::this_thread::sleep_for(std::chrono::microseconds(1 << attemps));
+        attemps = 0;
         return false;
     }
 
     if (global_queue.try_pop(task))
     {
-        attempts = 0;
+        attemps = 0;
         return true;
     }
 
-    size_t victim1 = dist(gen) % thread_data.size();
-    size_t victim2 = dist(gen) % thread_data.size();
+    // generate random number by thread_local's generator don't need synchronization
+    size_t victim1 = random_data.dist(random_data.gen) % thread_data.size();
+    size_t victim2 = random_data.dist(random_data.gen) % thread_data.size();
 
-    if (victim1 == self_id)
-        victim1 = (victim1 + 1) % thread_data.size();
-    if (victim2 == self_id)
-        victim2 = (victim2 + 1) % thread_data.size();
+    // avoid self stealing
+    victim1 = (victim1 == self_id) ? ((victim1 + 1) % thread_data.size()) : victim1;
+    victim2 = (victim2 == self_id) ? ((victim2 + 1) % thread_data.size()) : victim2;
 
     size_t victim = victim1;
     if (thread_data[victim2]->local_queue->size() >
@@ -90,11 +81,11 @@ bool ThreadPool::steal_task(std::function<void()> &task, size_t self_id)
 
     if (thread_data[victim]->local_queue->try_pop(task))
     {
-        attempts = 0;
+        attemps = 0;
         return true;
     }
 
-    attempts++;
+    attemps++;
     return false;
 }
 

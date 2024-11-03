@@ -120,19 +120,30 @@ auto ThreadPool::enqueue(F &&f, Args &&...args)
     std::future<return_type> res = task->get_future();
 
     static thread_local size_t next_thread = 0;
+    const size_t current_thread = next_thread;
     next_thread = (next_thread + 1) % thread_data.size();
 
-    auto wrapped_task = [task]()
+    auto wrapped_task = [task = std::move(task)]()
     { (*task)(); };
 
-    if (!thread_data[next_thread]->local_queue->push(wrapped_task))
+    // check if thread pool is stopped
+    if (stop_flag.load(std::memory_order_acquire))
     {
+        throw std::runtime_error("cannot enqueue on stopped thread pool");
+    }
+
+    // try to push to local queue
+    if (!thread_data[current_thread]->local_queue->push(std::move(wrapped_task)))
+    {
+        // local queue is full, push to global queue
         std::unique_lock<std::shared_mutex> lock(taskMutex);
-        if (stop_flag)
+
+        // check again if thread pool is stopped
+        if (stop_flag.load(std::memory_order_acquire))
         {
             throw std::runtime_error("cannot enqueue on stopped thread pool");
         }
-        if (!global_queue.push(wrapped_task))
+        if (!global_queue.push(std::move(wrapped_task)))
         {
             throw std::runtime_error("thread pool queue is full");
         }
