@@ -51,13 +51,21 @@ extern "C"
     // block header with cache line padding
     struct block_header
     {
+        uint32_t magic; // magic number to detect corruption
         ATOMIC(uint32_t)
-        state; // combines level and is_free flags
+        state; // level and free flag
         ATOMIC(struct block_header *)
         next;
-        size_t size; // actual block size
-        uint8_t padding[CACHE_LINE_SIZE];
+        size_t size;          // block size
+        uint32_t guard_begin; // guard pattern
+        uint8_t padding[CACHE_LINE_SIZE - sizeof(uint32_t)];
     } __attribute__((aligned(CACHE_LINE_SIZE)));
+
+    // footer for additional corruption detection
+    struct block_footer
+    {
+        uint32_t guard_end; // guard pattern
+    };
 
     // pool usage statistics
     struct pool_stats
