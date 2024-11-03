@@ -92,7 +92,7 @@ void Socket::bind()
 
 void Socket::listen()
 {
-    ::listen(server_fd, 42);
+    ::listen(server_fd, 42); // 42 is the ulrimate answer to life, universe and everything 😉
 }
 
 void Socket::closeSocket()
@@ -106,41 +106,36 @@ void Socket::closeSocket()
 
 int Socket::acceptConnection(std::string &clientIp)
 {
+    // use thread local buffer to avoid repeated allocation
+    static thread_local char ipstr[INET6_ADDRSTRLEN];
     struct sockaddr_in6 address;
     socklen_t addrlen = sizeof(address);
-    int new_socket = accept(server_fd, reinterpret_cast<struct sockaddr *>(&address),
-                            &addrlen);
+
+    // use accept4 to set nonblock flag directly, avoiding extra fcntl calls
+    int new_socket = accept4(server_fd,
+                             reinterpret_cast<struct sockaddr *>(&address),
+                             &addrlen,
+                             SOCK_NONBLOCK | SOCK_CLOEXEC);
 
     if (new_socket >= 0)
     {
-        char ipstr[INET6_ADDRSTRLEN];
+        // convert ip address to string format
         if (address.sin6_family == AF_INET6)
         {
             inet_ntop(AF_INET6, &address.sin6_addr, ipstr, sizeof(ipstr));
+            clientIp = ipstr;
+            Logger::getInstance()->success("New connection accepted from " + clientIp);
         }
-        clientIp = ipstr;
-        Logger::getInstance()->success("New connection accepted from " + clientIp);
-
-        int flags = fcntl(new_socket, F_GETFL, 0);
-        if (flags == -1)
-        {
-            Logger::getInstance()->error("Failed to get socket flags");
-            close(new_socket);
-            return -1;
-        }
-        if (fcntl(new_socket, F_SETFL, flags | O_NONBLOCK) == -1)
-        {
-            Logger::getInstance()->error("Failed to set socket to non-blocking mode");
-            close(new_socket);
-            return -1;
-        }
+        return new_socket;
     }
-    else
+    else if (errno != EWOULDBLOCK && errno != EAGAIN) // no pending connections
     {
+        // log error only for real failures, not for no-connection case
         clientIp = "-";
-        Logger::getInstance()->error("Failed to accept connection");
+        Logger::getInstance()->error("Failed to accept connection: " +
+                                     std::string(strerror(errno)));
     }
-    return new_socket;
+    return -1;
 }
 
 int Socket::getSocketFd() const

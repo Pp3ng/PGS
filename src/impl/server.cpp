@@ -27,21 +27,27 @@ Server::Server(int port, const std::string &staticFolder, int threadCount,
 
 void Server::start()
 {
-
+    startCacheCleanup();
     try
     {
-        // pre-allocate events array with optimal size
-        static constexpr size_t MAX_EVENTS =
-            1024; // again i don't know should i make it as a config or not
+        // configure epoll
+        static constexpr size_t MAX_EVENTS = 4096;
+        static constexpr size_t BATCH_SIZE = 64;
         struct epoll_event events[MAX_EVENTS];
 
-        // Efficient timeout tracking with pre-allocated vector
+        // timeout tracking
         std::vector<std::chrono::steady_clock::time_point> lastActivityTimes(1024);
-        static constexpr auto IDLE_TIMEOUT = std::chrono::seconds(30);
+        static constexpr auto IDLE_TIMEOUT = std::chrono::seconds(20);
+        static constexpr auto TIMEOUT_CHECK_INTERVAL = std::chrono::seconds(5);
         auto lastTimeoutCheck = std::chrono::steady_clock::now();
 
-        // add server socket to epoll
-        if (!epoll.add(socket.getSocketFd(), EPOLLIN))
+        // per batch connection handling
+        std::vector<int> newConnections;
+        std::vector<std::string> newConnectionIps;
+        newConnections.reserve(BATCH_SIZE);
+        newConnectionIps.reserve(BATCH_SIZE);
+
+        if (!epoll.add(socket.getSocketFd(), EPOLLIN | EPOLLET))
         {
             Logger::getInstance()->error("Failed to add server socket to epoll");
             return;
@@ -49,34 +55,44 @@ void Server::start()
 
         while (!shouldStop)
         {
-            // use shorter timeout for better responsiveness
-            int nfds = epoll.wait(events, MAX_EVENTS,
-                                  100); //(another parameter i don't know should i
-                                        // make it as a config or not)
 
-            // Only check timeouts when system load is not high
+            int nfds = epoll.wait(events, MAX_EVENTS, 50);
             auto now = std::chrono::steady_clock::now();
-            if (static_cast<size_t>(nfds) < MAX_EVENTS &&
-                now - lastTimeoutCheck > std::chrono::seconds(30))
+
+            // banlance between performance and accuracy(when low load check more frequently)
+            if ((static_cast<size_t>(nfds) < MAX_EVENTS / 2 &&
+                 now - lastTimeoutCheck > TIMEOUT_CHECK_INTERVAL) ||
+                now - lastTimeoutCheck > std::chrono::seconds(10))
             {
                 std::vector<int> timeoutSockets;
                 timeoutSockets.reserve(32);
 
                 {
                     std::lock_guard<std::mutex> lock(connectionsMutex);
-                    for (const auto &[fd, info] : connections)
+                    auto it = connections.begin();
+                    while (it != connections.end())
                     {
-                        if (static_cast<size_t>(fd) < lastActivityTimes.size() &&
-                            now - lastActivityTimes[fd] > IDLE_TIMEOUT)
+                        if (now - it->second.startTime > IDLE_TIMEOUT)
                         {
-                            timeoutSockets.push_back(fd);
+                            timeoutSockets.push_back(it->first);
+                            it = connections.erase(it);
+                        }
+                        else
+                        {
+                            ++it;
                         }
                     }
                 }
 
-                for (int fd : timeoutSockets)
+                if (!timeoutSockets.empty())
                 {
-                    closeConnection(fd);
+                    epoll.batch_operation(timeoutSockets.begin(), timeoutSockets.end(),
+                                          EPOLL_CTL_DEL);
+
+                    for (int fd : timeoutSockets)
+                    {
+                        close(fd);
+                    }
                 }
 
                 lastTimeoutCheck = now;
@@ -91,74 +107,88 @@ void Server::start()
                 break;
             }
 
+            newConnections.clear();
+            newConnectionIps.clear();
+
             for (int i = 0; i < nfds; ++i)
             {
                 if (events[i].data.fd == socket.getSocketFd())
                 {
-                    // handle new connection
-                    std::string clientIp;
-                    int client_socket = socket.acceptConnection(clientIp);
-                    if (client_socket < 0)
-                        continue;
+                    // accept more when load is low
+                    size_t maxAccepts = static_cast<size_t>(nfds) < MAX_EVENTS / 2 ? BATCH_SIZE : BATCH_SIZE / 2;
 
-                    // add connection info under lock
+                    for (size_t j = 0; j < maxAccepts; ++j)
                     {
-                        std::lock_guard<std::mutex> lock(connectionsMutex);
-                        connections.emplace(client_socket,
-                                            ConnectionInfo{now, // reuse timestamp
-                                                           clientIp, false, false, 0, 0});
+                        std::string clientIp;
+                        int client_socket = socket.acceptConnection(clientIp);
 
-                        if (static_cast<size_t>(client_socket) < lastActivityTimes.size())
+                        if (client_socket < 0)
                         {
-                            lastActivityTimes[client_socket] = now;
+                            if (errno != EAGAIN && errno != EWOULDBLOCK)
+                            {
+                                Logger::getInstance()->error("Accept error: " +
+                                                             std::string(strerror(errno)));
+                            }
+                            break;
                         }
-                        else
-                        {
-                            lastActivityTimes.resize(client_socket + 1024, now);
-                        }
+
+                        newConnections.push_back(client_socket);
+                        newConnectionIps.push_back(clientIp);
                     }
 
-                    try
+                    if (!newConnections.empty())
                     {
-                        // add to epoll with edge-triggered mode
-                        if (!epoll.add(client_socket, EPOLLIN | EPOLLET))
+                        size_t added = epoll.batch_operation(
+                            newConnections.begin(),
+                            newConnections.end(),
+                            EPOLL_CTL_ADD,
+                            EPOLLIN | EPOLLET);
+
                         {
-                            Logger::getInstance()->error("Failed to add client socket to epoll");
-                            closeConnection(client_socket);
-                            continue;
+                            std::lock_guard<std::mutex> lock(connectionsMutex);
+                            for (size_t j = 0; j < added; ++j)
+                            {
+                                connections.emplace(newConnections[j],
+                                                    ConnectionInfo{now, newConnectionIps[j]});
+
+                                if (static_cast<size_t>(newConnections[j]) < lastActivityTimes.size())
+                                {
+                                    lastActivityTimes[newConnections[j]] = now;
+                                }
+                                else
+                                {
+                                    lastActivityTimes.resize(newConnections[j] + 1024, now);
+                                }
+                            }
                         }
-                    }
-                    catch (const std::exception &e)
-                    {
-                        Logger::getInstance()->error(
-                            "Failed to add client socket to epoll: " +
-                            std::string(e.what()));
-                        closeConnection(client_socket);
-                        continue;
+
+                        if (added != newConnections.size())
+                        {
+                            for (size_t j = added; j < newConnections.size(); ++j)
+                            {
+                                close(newConnections[j]);
+                            }
+                        }
                     }
                 }
                 else
                 {
-                    // handle existing connection
                     int client_socket = events[i].data.fd;
                     std::string clientIp;
 
-                    // get client IP under lock
                     {
                         std::lock_guard<std::mutex> lock(connectionsMutex);
                         auto it = connections.find(client_socket);
                         if (it != connections.end())
                         {
                             clientIp = it->second.ip;
-                            if (static_cast<size_t>(client_socket) <
-                                lastActivityTimes.size())
+                            if (static_cast<size_t>(client_socket) < lastActivityTimes.size())
                             {
                                 lastActivityTimes[client_socket] = now;
                             }
                         }
                     }
 
-                    // enqueue client handling task
                     if (!clientIp.empty())
                     {
                         pool.enqueue([this, client_socket, clientIp]
@@ -181,56 +211,118 @@ void Server::stop()
     Logger::getInstance()->warning("Initiating server shutdown...");
     shouldStop = true;
 
-    // stop accepting new connections
+    // stop accepting new connections first
     socket.closeSocket();
 
-    // stop thread pool
+    // stop thread pool to prevent new tasks
     pool.stop();
 
-    // close all existing connections
-    std::vector<int> socketsToClose;
-    socketsToClose.reserve(connections.size()); // pre-allocate
+    // join cache cleanup thread
+    if (cacheCleanupThread.joinable())
+    {
+        cacheCleanupThread.join();
+    }
 
+    // collect all socket file descriptors
+    std::vector<int> socketsToClose;
     {
         std::lock_guard<std::mutex> lock(connectionsMutex);
+        socketsToClose.reserve(connections.size());
         for (const auto &[client_socket, _] : connections)
         {
             socketsToClose.push_back(client_socket);
         }
     }
 
-    // close connections in parallel for large number of connections
-    static constexpr size_t PARALLEL_THRESHOLD = 1000;
-    if (socketsToClose.size() > PARALLEL_THRESHOLD)
+    if (!socketsToClose.empty())
     {
-        const size_t num_threads = std::thread::hardware_concurrency();
-        std::vector<std::thread> threads;
-        threads.reserve(num_threads);
+        // batch remove all sockets from epoll first
+        epoll.batch_operation(socketsToClose.begin(), socketsToClose.end(),
+                              EPOLL_CTL_DEL);
 
-        const size_t chunk_size = socketsToClose.size() / num_threads;
-        for (size_t i = 0; i < num_threads; ++i)
+        // use parallel processing for large number of connections
+        static constexpr size_t PARALLEL_THRESHOLD = 32;
+        if (socketsToClose.size() > PARALLEL_THRESHOLD)
         {
-            size_t startPos = i * chunk_size;
-            size_t end = (i == num_threads - 1) ? socketsToClose.size() : (i + 1) * chunk_size;
+            // limit max threads to avoid resource exhaustion
+            static constexpr size_t MAX_THREADS = 4;
+            size_t num_threads = std::min(
+                socketsToClose.size() / PARALLEL_THRESHOLD,
+                MAX_THREADS);
 
-            threads.emplace_back([this, &socketsToClose, startPos, end]()
-                                 {
-                for (size_t j = startPos; j < end; ++j) {
-                    closeConnection(socketsToClose[j]);
-                } });
+            // prepare async tasks
+            std::vector<std::future<void>> futures;
+            futures.reserve(num_threads);
+
+            // calculate chunk size for each thread
+            size_t chunk_size = socketsToClose.size() / num_threads;
+            for (size_t i = 0; i < num_threads; ++i)
+            {
+                size_t start = i * chunk_size;
+                size_t end = (i == num_threads - 1) ? socketsToClose.size() : (i + 1) * chunk_size;
+
+                // launch async task for each chunk
+                futures.push_back(std::async(std::launch::async,
+                                             [this, &socketsToClose, start, end]()
+                                             {
+                                                 // collect connection info in batch
+                                                 std::vector<ConnectionInfo> infos;
+                                                 infos.reserve(end - start);
+
+                                                 {
+                                                     std::lock_guard<std::mutex> lock(connectionsMutex);
+                                                     for (size_t j = start; j < end; ++j)
+                                                     {
+                                                         auto it = connections.find(socketsToClose[j]);
+                                                         if (it != connections.end())
+                                                         {
+                                                             infos.push_back(it->second);
+                                                         }
+                                                     }
+                                                 }
+
+                                                 // close sockets in batch
+                                                 for (size_t j = start; j < end; ++j)
+                                                 {
+                                                     close(socketsToClose[j]);
+                                                 }
+
+                                                 // log connection info in batch
+                                                 for (const auto &info : infos)
+                                                 {
+                                                     auto duration = std::chrono::steady_clock::now() -
+                                                                     info.startTime;
+                                                     Logger::getInstance()->info(
+                                                         "Connection closed - Duration: " +
+                                                             Socket::durationToString(duration) +
+                                                             ", Bytes received: " +
+                                                             std::to_string(info.bytesReceived) +
+                                                             ", Bytes sent: " +
+                                                             std::to_string(info.bytesSent),
+                                                         info.ip);
+                                                 }
+                                             }));
+            }
+
+            // wait for all tasks to complete
+            for (auto &future : futures)
+            {
+                future.wait();
+            }
+        }
+        else
+        {
+            // sequential processing for small number of connections
+            for (int sock : socketsToClose)
+            {
+                close(sock);
+            }
         }
 
-        for (auto &thread : threads)
+        // clear all connection info
         {
-            thread.join();
-        }
-    }
-    else
-    {
-        // sequential processing for small number of connections
-        for (int sock : socketsToClose)
-        {
-            closeConnection(sock);
+            std::lock_guard<std::mutex> lock(connectionsMutex);
+            connections.clear();
         }
     }
 
@@ -239,12 +331,15 @@ void Server::stop()
 
 void Server::handleClient(int client_socket, const std::string &clientIp)
 {
-    // 1024 bytes is a good balance between memory usage and performance
-    std::vector<char> buffer(1024);
+    static constexpr size_t BUFFER_SIZE = 16384;
+    // use thread local to avoid repeated allocation
+    static thread_local std::vector<char> buffer(BUFFER_SIZE);
+    static thread_local std::string request;
+    request.clear();
 
-    ssize_t valread;               // number of bytes read in each operation
-    std::string request;           // accumulates the complete client request
-    bool connectionClosed = false; // tracks if the connection has been closed
+    ssize_t valread;                // bytes read in each operation
+    bool connectionClosed = false;  // track connection state
+    ssize_t totalBytesReceived = 0; // accumulate bytes for batch update
 
     // read data from client in chunks using non-blocking recv
     while ((valread = recv(client_socket, buffer.data(), buffer.size(), MSG_DONTWAIT)) > 0)
@@ -256,17 +351,19 @@ void Server::handleClient(int client_socket, const std::string &clientIp)
             return;
         }
 
-        // append the received data to the request string
-        // string will grow automatically as needed
+        // append received data to request string
         request.append(buffer.data(), valread);
+        totalBytesReceived += valread;
+    }
 
-        // update connection statistics under lock
-        // using minimal lock scope for better performance
+    // update connection statistics in batch to minimize lock time
+    if (totalBytesReceived > 0)
+    {
         std::lock_guard<std::mutex> lock(connectionsMutex);
         auto it = connections.find(client_socket);
         if (it != connections.end())
         {
-            it->second.bytesReceived += valread;
+            it->second.bytesReceived += totalBytesReceived;
         }
     }
 
@@ -280,8 +377,6 @@ void Server::handleClient(int client_socket, const std::string &clientIp)
     else if (valread < 0)
     {
         // check for expected non-blocking errors
-        // EAGAIN/EWOULDBLOCK: No data available
-        // EINTR: Interrupted by signal
         if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
         {
             closeConnection(client_socket);
@@ -289,7 +384,7 @@ void Server::handleClient(int client_socket, const std::string &clientIp)
         }
     }
 
-    // process the request if connection is still open and we have data
+    // process request if connection is still open and we have data
     if (!connectionClosed && !request.empty())
     {
         // extract request path and check if it's an asset request
@@ -302,8 +397,8 @@ void Server::handleClient(int client_socket, const std::string &clientIp)
             Logger::getInstance()->info("Processing request: " + path, clientIp);
         }
 
-        // apply rate limiting to the request
-        std::string processedRequest = rateLimiter.process(request);
+        // apply rate limiting to the request using move semantics
+        std::string processedRequest = rateLimiter.process(std::move(request));
 
         // check if request was rate limited
         if (processedRequest == "HTTP/1.1 429 Too Many Requests\r\n"
@@ -318,8 +413,8 @@ void Server::handleClient(int client_socket, const std::string &clientIp)
         }
         else
         {
-            // process the request through compression middleware and router
-            Compression compressionMiddleware;
+            // reuse compression middleware instance per thread
+            static thread_local Compression compressionMiddleware;
             router.route(path, client_socket, clientIp,
                          &compressionMiddleware, &cache);
         }
@@ -334,31 +429,34 @@ void Server::handleClient(int client_socket, const std::string &clientIp)
 
 void Server::closeConnection(int client_socket)
 {
-    std::lock_guard<std::mutex> lock(connectionsMutex);
-    auto it = connections.find(client_socket);
-    if (it != connections.end())
+    // copy connection info and check if need logging
+    std::string logInfo;
     {
-        if (!it->second.isClosureLogged)
+        std::lock_guard<std::mutex> lock(connectionsMutex);
+        auto it = connections.find(client_socket);
+        if (it != connections.end())
         {
-            auto duration = std::chrono::steady_clock::now() - it->second.startTime;
-            std::string durationStr = Socket::durationToString(duration);
-
-            Logger::getInstance()->info(
-                "Connection closed - Duration: " + durationStr +
-                    ", Bytes received: " + std::to_string(it->second.bytesReceived) +
-                    ", Bytes sent: " + std::to_string(it->second.bytesSent),
-                it->second.ip);
-
-            it->second.isClosureLogged = true;
+            if (!it->second.isClosureLogged)
+            {
+                // prepare log message inside lock but log outside
+                auto duration = std::chrono::steady_clock::now() - it->second.startTime;
+                std::string durationStr = Socket::durationToString(duration);
+                logInfo = "Connection closed - Duration: " + durationStr +
+                          ", Bytes received: " + std::to_string(it->second.bytesReceived) +
+                          ", Bytes sent: " + std::to_string(it->second.bytesSent);
+            }
+            connections.erase(it);
         }
-        connections.erase(it);
     }
 
-    if (!epoll.remove(client_socket))
+    // log outside the lock if needed
+    if (!logInfo.empty())
     {
-        Logger::getInstance()->error("Failed to remove client socket from epoll");
+        Logger::getInstance()->info(logInfo);
     }
 
+    // batch remove from epoll and close socket
+    epoll.batch_operation(&client_socket, &client_socket + 1, EPOLL_CTL_DEL);
     close(client_socket);
 }
 
@@ -368,22 +466,23 @@ void Server::startCacheCleanup()
                                      {
         pthread_setname_np(pthread_self(), "cache-cleanup");
         
-        // set higher priority for cache cleanup thread
         if (nice(10) == -1) {
             Logger::getInstance()->warning("Failed to set cache cleanup thread priority");
         }
 
-        std::mutex mtx;
-        std::condition_variable cv;
+        std::atomic<bool> cleanupRunning{true};
+        
+        sigset_t set;
+        sigemptyset(&set);
+        sigaddset(&set, SIGINT);
+        sigaddset(&set, SIGTERM);
+        pthread_sigmask(SIG_BLOCK, &set, nullptr);
 
         while (!shouldStop) {
             cache.periodicCleanup();
             
-            {
-                std::unique_lock<std::mutex> lock(mtx);
-                cv.wait_for(lock, CACHE_CLEANUP_INTERVAL, [this]() { 
-                    return shouldStop.load(); 
-                });
+            for (int i = 0; i < 60 && !shouldStop; ++i) {
+                std::this_thread::sleep_for(std::chrono::seconds(1));
             }
         } });
 
