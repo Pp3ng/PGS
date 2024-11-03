@@ -24,16 +24,11 @@ extern "C"
 #endif
 
 // memory pool constants (i dont know if this configuration is correct)
-#define DEFAULT_CACHE_LINE_SIZE 128 // default cache line size
-#define MIN_BLOCK_SIZE 256          // minimum block size
-#define DEFAULT_MAX_LEVELS 18       // maximum buddy system levels
-#define ALIGNMENT 128               // memory alignment requirement
-#define MAX_CACHE_BLOCKS 64         // maximum blocks in thread local cache
-
-// cache line size for architecture
-#ifndef CACHE_LINE_SIZE
-#define CACHE_LINE_SIZE DEFAULT_CACHE_LINE_SIZE
-#endif
+#define CACHE_LINE_SIZE 64    // default cache line size
+#define MIN_BLOCK_SIZE 32     // minimum block size
+#define DEFAULT_MAX_LEVELS 16 // maximum buddy system levels
+#define ALIGNMENT 16          // memory alignment requirement
+#define MAX_CACHE_BLOCKS 64   // maximum blocks in thread local cache
 
 // atomic operations helpers
 #define ATOMIC_LOAD(ptr) atomic_load(ptr)
