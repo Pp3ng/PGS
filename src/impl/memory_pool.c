@@ -9,11 +9,15 @@
 #define GUARD_PATTERN 0xDEADBEEF
 #define HEADER_MAGIC 0xFEEDFACE
 
+typedef uint32_t level_t;
+static void merge_buddies(struct thread_memory_pool *pool, struct block_header *block);
+
 // round up a number to the nearest power of 2
 static inline size_t round_up_to_power_of_2(size_t x)
 {
     if (0 == x)
         return MIN_BLOCK_SIZE;
+
     // improved overflow check with explicit size_t cast
     if (x > (((size_t)1 << (sizeof(size_t) * 8 - 1))))
         return 0;
@@ -42,50 +46,59 @@ static inline size_t round_up_to_power_of_2(size_t x)
 }
 
 // calculate the level in the buddy system for a given size
-static inline int get_level(size_t size)
+static inline level_t get_level(size_t size)
 {
+    if (size > ((size_t)-1) - sizeof(struct block_header))
+        return (level_t)-1;
+
     size_t normalized = round_up_to_power_of_2(size + sizeof(struct block_header));
-    return __builtin_ctzl(normalized / MIN_BLOCK_SIZE);
+    if (normalized == 0 || normalized < MIN_BLOCK_SIZE)
+        return (level_t)-1;
+
+    return (level_t)__builtin_ctzl(normalized / MIN_BLOCK_SIZE);
 }
 
 // prefetch block for read/write
-static inline void prefetch_block(void *addr, int rw)
+static inline void prefetch_block(const void *addr, int rw)
 {
+    if (!addr)
+        return;
+
     if (rw)
-    {
-        __builtin_prefetch(addr, 1, 3); // prefetch for write
-    }
+        __builtin_prefetch(addr, 1, 3);
     else
-    {
-        __builtin_prefetch(addr, 0, 3); // prefetch for read
-    }
+        __builtin_prefetch(addr, 0, 3);
 }
 
-// thread local storage for memory pool and cache
 THREAD_LOCAL struct thread_memory_pool *local_pool = NULL;
 THREAD_LOCAL struct thread_cache local_cache = {0};
 
 // try to get block from thread local cache
 static void *get_from_cache(size_t size)
 {
+    if (size == 0)
+        return NULL;
+
     struct thread_cache *cache = &local_cache;
     for (size_t i = 0; i < cache->count; i++)
     {
         struct block_header *block = PTR_CAST(struct block_header *, cache->blocks[i]);
 
-        // validate block header
         if (!block || block->magic != HEADER_MAGIC)
         {
-            // remove corrupted block from cache
-            cache->blocks[i] = cache->blocks[--cache->count];
+            if (i < cache->count - 1)
+                cache->blocks[i] = cache->blocks[cache->count - 1];
+            cache->count--;
             continue;
         }
 
-        // check if block size is enough
         if (block->size >= size)
         {
-            cache->blocks[i] = cache->blocks[--cache->count];
-            return block;
+            void *result = block;
+            if (i < cache->count - 1)
+                cache->blocks[i] = cache->blocks[cache->count - 1];
+            cache->count--;
+            return result;
         }
     }
     return NULL;
@@ -105,7 +118,13 @@ static void add_to_cache(struct thread_memory_pool *pool, void *block)
     if (cache->count < MAX_CACHE_BLOCKS)
     {
         cache->blocks[cache->count++] = block;
-        atomic_fetch_add(&pool->stats.cache_hits, 1);
+        pool->stats.cache_hits++;
+    }
+    else
+    {
+        // if cache is full, merge the block back to pool
+        header->state |= 1; // mark as free
+        merge_buddies(pool, header);
     }
 }
 
@@ -117,26 +136,46 @@ static inline bool validate_pool(struct thread_memory_pool *pool)
     if (pool->total_size < MIN_BLOCK_SIZE)
         return false;
     if (pool->total_size > (1UL << 31))
-        return false; // reasonable maximum size
+        return false;
+    if ((uintptr_t)pool->memory % ALIGNMENT != 0)
+        return false;
     return true;
 }
-
 static inline bool validate_block(struct thread_memory_pool *pool, struct block_header *block)
 {
-    if (!block)
+    if (!block || !pool)
         return false;
     if (block->magic != HEADER_MAGIC)
         return false;
+
+    // check if block is within pool bounds
     if ((uintptr_t)block < (uintptr_t)pool->memory ||
         (uintptr_t)block >= (uintptr_t)pool->memory + pool->total_size)
     {
         return false;
     }
+
+    // check if block size is valid
+    if (block->size == 0 ||
+        block->size > pool->total_size - (sizeof(struct block_header) + sizeof(struct block_footer)))
+    {
+        return false;
+    }
+
+    // validate block boundaries
     if (block->guard_begin != GUARD_PATTERN)
         return false;
 
     struct block_footer *footer = PTR_CAST(struct block_footer *,
                                            (char *)block + sizeof(struct block_header) + block->size);
+
+    // check if footer is within pool bounds
+    if ((uintptr_t)footer + sizeof(struct block_footer) >
+        (uintptr_t)pool->memory + pool->total_size)
+    {
+        return false;
+    }
+
     if (footer->guard_end != GUARD_PATTERN)
         return false;
 
@@ -149,72 +188,63 @@ static void merge_buddies(struct thread_memory_pool *pool, struct block_header *
     if (!validate_block(pool, block))
         return;
 
-    // calculate initial block size based on state level
     size_t size = MIN_BLOCK_SIZE << (block->state >> 1);
-
-    // calculate buddy's address by XORing with size
     struct block_header *buddy = PTR_CAST(struct block_header *, (uintptr_t)block ^ size);
 
-    // continue merging as long as buddy is within pool memory range
-    while ((uintptr_t)buddy >= (uintptr_t)pool->memory &&
+    // limit merge iterations to prevent infinite loops
+    int merge_count = 0;
+    const int MAX_MERGE_ITERATIONS = 32;
+
+    while (merge_count++ < MAX_MERGE_ITERATIONS &&
+           (uintptr_t)buddy >= (uintptr_t)pool->memory &&
            (uintptr_t)buddy < (uintptr_t)pool->memory + pool->total_size)
     {
-        // if buddy is occupied, stop merging
         if (!validate_block(pool, buddy) || !(buddy->state & 1))
             break;
 
-        // verify buddy is at correct level
-        if ((buddy->state >> 1) != (block->state >> 1))
-        {
+        level_t buddy_level = buddy->state >> 1;
+        level_t block_level = block->state >> 1;
+
+        if (buddy_level != block_level)
             break;
-        }
 
-        // set the lower address block as primary for next merge
+        // ensure we merge from lower address to higher
         block = (block < buddy) ? block : buddy;
+        block->state += 2; // increase level and keep free flag
 
-        // increment block's level to represent merged size
-        block->state += 2;
-
-        // update memory guards for merged block
+        // update block metadata
+        block->size = (MIN_BLOCK_SIZE << (block->state >> 1)) -
+                      (sizeof(struct block_header) + sizeof(struct block_footer));
         block->guard_begin = GUARD_PATTERN;
+
         struct block_footer *footer = PTR_CAST(struct block_footer *,
                                                (char *)block + sizeof(struct block_header) + block->size);
         footer->guard_end = GUARD_PATTERN;
 
-        // double size for next level's buddy calculation
         size <<= 1;
-
-        // calculate new buddy address
         buddy = PTR_CAST(struct block_header *, (uintptr_t)block ^ size);
     }
 }
 
-// create a new thread memory pool with specified size and max levels
 struct thread_memory_pool *create_thread_pool(size_t size, int max_levels)
 {
     if (size < MIN_BLOCK_SIZE || max_levels <= 0 || max_levels > DEFAULT_MAX_LEVELS)
-    {
         return NULL;
-    }
 
-    // allocate memory for the thread pool structure
     struct thread_memory_pool *pool = aligned_alloc(CACHE_LINE_SIZE, sizeof(struct thread_memory_pool));
     if (!pool)
         return NULL;
 
-    // zero-initialize the memory pool structure
     memset(pool, 0, sizeof(struct thread_memory_pool));
 
-    // align total size to the next power of 2
     size = round_up_to_power_of_2(size);
     if (size == 0)
     {
         free(pool);
         return NULL;
     }
-    pool->total_size = size;
 
-    // allocate aligned memory block for the pool
+    pool->total_size = size;
     pool->memory = aligned_alloc(ALIGNMENT, size);
     if (!pool->memory)
     {
@@ -222,35 +252,48 @@ struct thread_memory_pool *create_thread_pool(size_t size, int max_levels)
         return NULL;
     }
 
-    // initialize the first block header
+    // initialize first block
     struct block_header *first = PTR_CAST(struct block_header *, pool->memory);
-    first->magic = HEADER_MAGIC;                // set magic number for integrity check
-    first->state = ((max_levels - 1) << 1) | 1; // set level and free flag
+    first->magic = HEADER_MAGIC;
+    first->state = ((level_t)(max_levels - 1) << 1) | 1; // set as free
     first->size = size - (sizeof(struct block_header) + sizeof(struct block_footer));
-    first->guard_begin = GUARD_PATTERN; // set guard pattern for buffer overflow detection
+    first->guard_begin = GUARD_PATTERN;
+    first->next = NULL;
 
-    // set the footer guard pattern
     struct block_footer *footer = PTR_CAST(struct block_footer *,
                                            (char *)first + sizeof(struct block_header) + first->size);
-    footer->guard_end = GUARD_PATTERN; // set guard pattern at end of block
+    footer->guard_end = GUARD_PATTERN;
 
-    // link the first block to the free list for the maximum level
-    atomic_store(&pool->free_lists[max_levels - 1], PTR_CAST(ATOMIC(struct block_header *), first));
+    pool->free_lists[max_levels - 1] = first;
 
     return pool;
 }
-
-// allocate memory from pool
 void *pool_allocate(struct thread_memory_pool *pool, size_t size)
 {
-    if (!validate_pool(pool) || size == 0 || size > pool->total_size - sizeof(struct block_header))
+    // validate input parameters
+    if (!validate_pool(pool) || size == 0)
     {
-        atomic_fetch_add(&pool->stats.cache_misses, 1);
+        if (pool)
+            pool->stats.cache_misses++;
         return NULL;
     }
 
-    // align size to prevent misaligned access
+    // check total size with headers
+    size_t total_header_size = sizeof(struct block_header) + sizeof(struct block_footer);
+    if (size > pool->total_size - total_header_size)
+    {
+        pool->stats.cache_misses++;
+        return NULL;
+    }
+
+    // align size and check for overflow
+    size_t original_size = size;
     size = (size + (ALIGNMENT - 1)) & ~(ALIGNMENT - 1);
+    if (size < original_size || size > pool->total_size - total_header_size)
+    {
+        pool->stats.cache_misses++;
+        return NULL;
+    }
 
     // try cache first
     void *cached = get_from_cache(size);
@@ -259,112 +302,124 @@ void *pool_allocate(struct thread_memory_pool *pool, size_t size)
         struct block_header *header = PTR_CAST(struct block_header *, cached);
         if (!validate_block(pool, header))
         {
-            atomic_fetch_add(&pool->stats.cache_misses, 1);
+            pool->stats.cache_misses++;
             return NULL;
         }
-        atomic_fetch_add(&pool->stats.allocations, 1);
+        pool->stats.allocations++;
         return (char *)cached + sizeof(struct block_header);
     }
 
-    int level = get_level(size);
+    // find appropriate level
+    level_t level = get_level(size);
     if (level >= DEFAULT_MAX_LEVELS)
     {
-        atomic_fetch_add(&pool->stats.cache_misses, 1);
+        pool->stats.cache_misses++;
         return NULL;
     }
 
-    for (int i = level; i < DEFAULT_MAX_LEVELS; i++)
+    // search for free block
+    for (level_t i = level; i < DEFAULT_MAX_LEVELS; i++)
     {
-        struct block_header *current = PTR_CAST(struct block_header *,
-                                                atomic_load(&pool->free_lists[i]));
+        struct block_header *current = pool->free_lists[i];
+        struct block_header *prev = NULL;
 
         while (current)
         {
+            // prefetch next block for better performance
+            prefetch_block(current->next, 0);
+
             if (!validate_block(pool, current))
             {
-                // skip corrupted block and try next
-                current = PTR_CAST(struct block_header *, atomic_load(&current->next));
+                // remove invalid block from list
+                if (prev)
+                    prev->next = current->next;
+                else
+                    pool->free_lists[i] = current->next;
+                current = current->next;
                 continue;
             }
 
-            prefetch_block(current->next, 0);
-
-            uint32_t expected_state = (i << 1) | 1;
-            uint32_t new_state = (i << 1);
-
-            if (atomic_compare_exchange_strong(&current->state, &expected_state, new_state))
+            if ((current->state & 1) && ((current->state >> 1) == i))
             {
-                // initialize new block
-                current->magic = HEADER_MAGIC;
-                current->guard_begin = GUARD_PATTERN;
+                // remove from free list
+                if (prev)
+                    prev->next = current->next;
+                else
+                    pool->free_lists[i] = current->next;
 
-                struct block_footer *footer = PTR_CAST(struct block_footer *,
-                                                       (char *)current + sizeof(struct block_header) + size);
-                footer->guard_end = GUARD_PATTERN;
+                // mark as allocated
+                current->state &= ~1;
 
-                // split block if needed with safety checks
+                // split if needed
                 if (i > level)
                 {
-                    size_t remaining_size = MIN_BLOCK_SIZE << i;
-                    remaining_size -= sizeof(struct block_header) + size + sizeof(struct block_footer);
+                    size_t block_size = MIN_BLOCK_SIZE << i;
+                    size_t needed_size = sizeof(struct block_header) + size + sizeof(struct block_footer);
+                    size_t remaining_size = block_size - needed_size;
 
                     if (remaining_size >= MIN_BLOCK_SIZE)
                     {
                         // create buddy block
                         struct block_header *buddy = PTR_CAST(struct block_header *,
-                                                              (char *)current + sizeof(struct block_header) + size + sizeof(struct block_footer));
+                                                              (char *)current + needed_size);
 
-                        // assign buddy block properties
+                        // initialize buddy block
                         buddy->magic = HEADER_MAGIC;
-                        buddy->state = (i << 1) | 1;
-                        buddy->size = remaining_size - (sizeof(struct block_header) + sizeof(struct block_footer));
+                        buddy->state = ((i - 1) << 1) | 1; // set as free
+                        buddy->size = remaining_size - total_header_size;
                         buddy->guard_begin = GUARD_PATTERN;
+                        buddy->next = NULL;
 
+                        // setup buddy footer
                         struct block_footer *buddy_footer = PTR_CAST(struct block_footer *,
                                                                      (char *)buddy + sizeof(struct block_header) + buddy->size);
                         buddy_footer->guard_end = GUARD_PATTERN;
 
-                        atomic_store(&buddy->next, atomic_load(&pool->free_lists[i - 1]));
-                        atomic_store(&pool->free_lists[i - 1], PTR_CAST(ATOMIC(struct block_header *), buddy));
+                        // add buddy to free list
+                        buddy->next = pool->free_lists[i - 1];
+                        pool->free_lists[i - 1] = buddy;
+
+                        // update current block size
+                        current->size = size;
+
+                        // update current block footer
+                        struct block_footer *current_footer = PTR_CAST(struct block_footer *,
+                                                                       (char *)current + sizeof(struct block_header) + current->size);
+                        current_footer->guard_end = GUARD_PATTERN;
                     }
                 }
 
-                atomic_fetch_add(&pool->stats.allocations, 1);
-                atomic_fetch_add(&pool->stats.current_usage, size);
-
-                // update peak usage atomically
-                size_t current_peak = atomic_load(&pool->stats.peak_usage);
-                size_t new_usage = atomic_load(&pool->stats.current_usage);
-                while (new_usage > current_peak)
+                // update stats
+                pool->stats.allocations++;
+                pool->stats.current_usage += current->size;
+                if (pool->stats.current_usage > pool->stats.peak_usage)
                 {
-                    if (atomic_compare_exchange_weak(&pool->stats.peak_usage,
-                                                     &current_peak, new_usage))
-                    {
-                        break;
-                    }
+                    pool->stats.peak_usage = pool->stats.current_usage;
                 }
 
                 return (char *)current + sizeof(struct block_header);
             }
 
-            current = PTR_CAST(struct block_header *, atomic_load(&current->next));
+            prev = current;
+            current = current->next;
         }
     }
-    atomic_fetch_add(&pool->stats.cache_misses, 1);
+
+    pool->stats.cache_misses++;
     return NULL;
 }
 
-// get thread local pool, creating if necessary
 struct thread_memory_pool *get_thread_pool(void)
 {
     if (!local_pool)
     {
-        local_pool = create_thread_pool(1UL << 20, DEFAULT_MAX_LEVELS); // 1MB default
+        local_pool = create_thread_pool(1UL << 20, DEFAULT_MAX_LEVELS);
         if (!local_pool)
         {
             return NULL;
         }
     }
+
     if (!validate_pool(local_pool))
     {
         local_pool = NULL;
@@ -373,107 +428,141 @@ struct thread_memory_pool *get_thread_pool(void)
 
     return local_pool;
 }
-
-// deallocate memory back to pool
-void pool_deallocate(struct thread_memory_pool *pool, void *ptr)
+void pool_free(struct thread_memory_pool *pool, void *ptr)
 {
-    if (!validate_pool(pool) || !ptr)
+    if (!pool || !ptr)
         return;
 
-    struct block_header *header = PTR_CAST(struct block_header *,
-                                           (char *)ptr - sizeof(struct block_header));
+    struct block_header *block = PTR_CAST(struct block_header *,
+                                          (char *)ptr - sizeof(struct block_header));
 
-    if (!validate_block(pool, header))
-    {
-        // log corruption detection
-        atomic_fetch_add(&pool->stats.cache_misses, 1);
+    if (!validate_block(pool, block))
         return;
-    }
 
-    // verify block size
-    if (header->size == 0 || header->size > pool->total_size -
-                                                (sizeof(struct block_header) + sizeof(struct block_footer)))
-    {
-        return;
-    }
+    // update stats
+    pool->stats.frees++;
+    pool->stats.current_usage -= block->size;
 
-    // try cache first for small blocks
-    if (header->size <= (MIN_BLOCK_SIZE << (DEFAULT_MAX_LEVELS / 2)))
-    {
-        if (pool->cache)
-        {
-            add_to_cache(pool, header);
-            return;
-        }
-    }
-
-    uint32_t state = atomic_load_explicit(&header->state, memory_order_acquire);
-
-    // ensure block isn't already freed
-    if (state & 1)
-    {
-        return;
-    }
-
-    atomic_store_explicit(&header->state, state | 1, memory_order_release);
-    atomic_fetch_add_explicit(&pool->stats.deallocations, 1, memory_order_relaxed);
-    atomic_fetch_sub_explicit(&pool->stats.current_usage, header->size, memory_order_relaxed);
-
-    merge_buddies(pool, header);
+    // try to add to cache first
+    add_to_cache(pool, block);
 }
 
 void destroy_thread_pool(struct thread_memory_pool *pool)
 {
-    if (!validate_pool(pool))
+    if (!pool)
         return;
 
-    // cleanup cache
-    if (pool->cache)
+    // clear cache first
+    struct thread_cache *cache = &local_cache;
+    for (size_t i = 0; i < cache->count; i++)
     {
-        for (size_t i = 0; i < MAX_CACHE_BLOCKS; i++)
+        struct block_header *block = PTR_CAST(struct block_header *, cache->blocks[i]);
+        if (block && block->magic == HEADER_MAGIC)
         {
-            if (pool->cache->blocks[i])
-            {
-                struct block_header *block = PTR_CAST(struct block_header *,
-                                                      pool->cache->blocks[i]);
-                if (validate_block(pool, block))
-                {
-                    merge_buddies(pool, block);
-                }
-            }
+            block->magic = 0;  // invalidate block
+            block->state |= 1; // mark as free
+            merge_buddies(pool, block);
         }
-        free(pool->cache);
-        pool->cache = NULL;
     }
+    cache->count = 0;
 
-    // clean all blocks' magic (prevent use after free)
+    // clear all blocks
     for (int i = 0; i < DEFAULT_MAX_LEVELS; i++)
     {
-        struct block_header *current = PTR_CAST(struct block_header *,
-                                                atomic_load(&pool->free_lists[i]));
+        struct block_header *current = pool->free_lists[i];
         while (current)
         {
             if (validate_block(pool, current))
             {
-                current->magic = 0; // clear magic number
-                current = PTR_CAST(struct block_header *, atomic_load(&current->next));
+                current->magic = 0; // invalidate block
             }
+            current = current->next;
         }
+        pool->free_lists[i] = NULL;
     }
 
-    // free memory block
-    void *memory = pool->memory;
-    pool->memory = NULL;
-    if (memory)
+    // free pool memory
+    if (pool->memory)
     {
-        free(memory);
+        free(pool->memory);
+        pool->memory = NULL;
     }
 
-    // free pool structure
+    // clear pool structure
+    memset(pool, 0, sizeof(struct thread_memory_pool));
+    free(pool);
+
+    // clear thread local storage
     if (local_pool == pool)
     {
         local_pool = NULL;
     }
+}
 
-    free(pool);
+void pool_get_stats(struct thread_memory_pool *pool, struct pool_stats *stats)
+{
+    if (!pool || !stats)
+        return;
+
+    memcpy(stats, &pool->stats, sizeof(struct pool_stats));
+}
+
+void pool_reset_stats(struct thread_memory_pool *pool)
+{
+    if (!pool)
+        return;
+
+    memset(&pool->stats, 0, sizeof(struct pool_stats));
+}
+
+bool pool_validate(struct thread_memory_pool *pool)
+{
+    if (!validate_pool(pool))
+        return false;
+
+    // validate cache
+    struct thread_cache *cache = &local_cache;
+    for (size_t i = 0; i < cache->count; i++)
+    {
+        struct block_header *block = PTR_CAST(struct block_header *, cache->blocks[i]);
+        if (!validate_block(pool, block))
+            return false;
+    }
+
+    // validate all blocks in free lists
+    for (level_t i = 0; i < DEFAULT_MAX_LEVELS; i++)
+    {
+        struct block_header *current = pool->free_lists[i];
+        while (current)
+        {
+            if (!validate_block(pool, current))
+                return false;
+
+            // verify level matches index
+            if ((current->state >> 1) != i)
+                return false;
+
+            // verify block is marked as free
+            if (!(current->state & 1))
+                return false;
+
+            current = current->next;
+        }
+    }
+
+    return true;
+}
+
+size_t pool_get_block_size(void *ptr)
+{
+    if (!ptr)
+        return 0;
+
+    struct block_header *block = PTR_CAST(struct block_header *,
+                                          (char *)ptr - sizeof(struct block_header));
+
+    if (block->magic != HEADER_MAGIC)
+        return 0;
+
+    return block->size;
 }

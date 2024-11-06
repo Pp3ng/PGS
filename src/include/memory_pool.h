@@ -5,14 +5,10 @@
 #include <stdint.h>
 
 #ifdef __cplusplus
-#include <atomic>
-#define ATOMIC(T) std::atomic<T>
 #define THREAD_LOCAL thread_local
 extern "C"
 {
 #else
-#include <stdatomic.h>
-#define ATOMIC(T) _Atomic T
 #define THREAD_LOCAL _Thread_local
 #endif
 
@@ -23,17 +19,12 @@ extern "C"
 #define PTR_CAST(T, x) (T)(x)
 #endif
 
-// memory pool constants (i dont know if this configuration is correct)
+// memory pool constants
 #define CACHE_LINE_SIZE 64    // default cache line size
 #define MIN_BLOCK_SIZE 32     // minimum block size
 #define DEFAULT_MAX_LEVELS 16 // maximum buddy system levels
 #define ALIGNMENT 16          // memory alignment requirement
 #define MAX_CACHE_BLOCKS 64   // maximum blocks in thread local cache
-
-// atomic operations helpers
-#define ATOMIC_LOAD(ptr) atomic_load(ptr)
-#define ATOMIC_STORE(ptr, val) atomic_store(ptr, val)
-#define ATOMIC_EXCHANGE(ptr, val) atomic_exchange(ptr, val)
 
     // thread local cache structure
     struct thread_cache
@@ -47,10 +38,8 @@ extern "C"
     struct block_header
     {
         uint32_t magic; // magic number to detect corruption
-        ATOMIC(uint32_t)
-        state; // level and free flag
-        ATOMIC(struct block_header *)
-        next;
+        uint32_t state; // level and free flag
+        struct block_header *next;
         size_t size;          // block size
         uint32_t guard_begin; // guard pattern
         uint8_t padding[CACHE_LINE_SIZE - sizeof(uint32_t)];
@@ -65,30 +54,24 @@ extern "C"
     // pool usage statistics
     struct pool_stats
     {
-        ATOMIC(size_t)
-        allocations; // total allocations
-        ATOMIC(size_t)
-        deallocations; // total deallocations
-        ATOMIC(size_t)
-        current_usage; // current memory usage
-        ATOMIC(size_t)
-        peak_usage; // peak memory usage
-        ATOMIC(size_t)
-        cache_hits; // local cache hits
-        ATOMIC(size_t)
-        cache_misses; // local cache misses
+        size_t allocations;   // total allocations
+        size_t deallocations; // total deallocations
+        size_t current_usage; // current memory usage
+        size_t peak_usage;    // peak memory usage
+        size_t frees;         // total free operations
+        size_t cache_hits;    // local cache hits
+        size_t cache_misses;  // local cache misses
     };
 
     // thread memory pool structure
     struct thread_memory_pool
     {
-        void *memory;               // pool memory block
-        size_t total_size;          // total pool size
-        struct thread_cache *cache; // thread local cache
-        ATOMIC(struct block_header *)
-        free_lists[DEFAULT_MAX_LEVELS]; // free block lists
-        struct pool_stats stats;        // pool statistics
-        char padding[CACHE_LINE_SIZE];  // prevent false sharing
+        void *memory;                                        // pool memory block
+        size_t total_size;                                   // total pool size
+        struct thread_cache *cache;                          // thread local cache
+        struct block_header *free_lists[DEFAULT_MAX_LEVELS]; // free block lists
+        struct pool_stats stats;                             // pool statistics
+        char padding[CACHE_LINE_SIZE];                       // prevent false sharing
     } __attribute__((aligned(CACHE_LINE_SIZE)));
 
     // thread-local pool instance
