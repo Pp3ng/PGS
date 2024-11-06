@@ -3,22 +3,6 @@
 // initialize static members
 thread_local ThreadPool::ThreadLocalRandomData ThreadPool::random_data;
 
-ThreadPool::ThreadData::ThreadData(size_t thread_id)
-    : local_queue(std::make_unique<LockFreeQueue<std::function<void()>>>()),
-      memory_pool(nullptr), // initialize memory pool as nullptr
-      id(thread_id)
-{
-}
-
-ThreadPool::ThreadData::~ThreadData()
-{
-    if (memory_pool)
-    {
-        destroy_thread_pool(memory_pool);
-        memory_pool = nullptr;
-    }
-}
-
 ThreadPool::ThreadPool(size_t numThreads)
 {
     thread_data.reserve(numThreads);
@@ -98,19 +82,9 @@ void ThreadPool::worker_thread(size_t id)
             "thread affinity setting failed for worker-" + std::to_string(id));
     }
 
-    // initialize thread local memory pool
     auto &local_data = thread_data[id];
-    local_data->memory_pool = get_thread_pool();
-    if (!local_data->memory_pool)
-    {
-        Logger::getInstance()->error(
-            "failed to initialize memory pool for worker-" + std::to_string(id));
-        return;
-    }
-
     std::function<void()> task;
     size_t spin_count = 0;
-
     while (!stop_flag.load(std::memory_order_relaxed))
     {
         bool got_task = false;
@@ -187,13 +161,6 @@ void ThreadPool::worker_thread(size_t id)
             spin_count = 0;
             std::this_thread::sleep_for(std::chrono::microseconds(100));
         }
-    }
-
-    // cleanup thread local memory pool
-    if (local_data->memory_pool)
-    {
-        destroy_thread_pool(local_data->memory_pool);
-        local_data->memory_pool = nullptr;
     }
 }
 

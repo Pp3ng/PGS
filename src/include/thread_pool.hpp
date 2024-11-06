@@ -3,7 +3,8 @@
 
 #include "common.hpp"
 #include "logger.hpp"
-#include "memory_pool.h"
+
+#define CACHE_LINE_SIZE 64 // cache line size in bytes
 
 class ThreadPool
 {
@@ -47,13 +48,13 @@ private:
     struct alignas(CACHE_LINE_SIZE) ThreadData
     {
         std::unique_ptr<LockFreeQueue<std::function<void()>>> local_queue;
-        thread_memory_pool *memory_pool; // thread local memory pool
         size_t steal_attempts{0};
         size_t id;
         std::atomic<size_t> tasks_processed{0};
 
-        explicit ThreadData(size_t thread_id);
-        ~ThreadData();
+        explicit ThreadData(size_t thread_id) : local_queue(std::make_unique<LockFreeQueue<std::function<void()>>>()),
+                                                id(thread_id) {}
+        ~ThreadData() = default;
     };
 
     // member variables
