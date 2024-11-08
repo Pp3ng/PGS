@@ -139,7 +139,7 @@ The server will:
 ### Socket Handling
 
 - Non-blocking sockets with epoll for I/O multiplexing
-- SO_REUSEADDR option enabled
+- SO_REUSEADDR option enabled and more socket options for performance 
 - IPv6 support (dual-stack)
 
 ### Router Features
