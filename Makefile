@@ -1,7 +1,7 @@
 CXX = g++
 CC = gcc
-ARCH_FLAGS = -march=native -mtune=native
-OPT_FLAGS = -O3 -flto -fno-omit-frame-pointer
+ARCH_FLAGS = -march=native -mtune=native -msse4.2 -mavx2 -mfma
+OPT_FLAGS = -O3 -flto -fprefetch-loop-arrays -fomit-frame-pointer -ftree-vectorize 
 COMMON_FLAGS = -Wall -Wextra -Wpedantic -I./src/include $(ARCH_FLAGS) $(OPT_FLAGS)
 CXXFLAGS = -std=c++20 $(COMMON_FLAGS)
 CFLAGS = $(COMMON_FLAGS)
