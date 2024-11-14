@@ -2,7 +2,7 @@
 
 Socket::Socket(int port) : port(port)
 {
-    // Create a dual-stack socket that supports both IPv6 and IPv4
+    // create a dual-stack socket that supports both ipv6 and ipv4
     if ((server_fd = socket(AF_INET6, SOCK_STREAM, 0)) == -1)
     {
         Logger::getInstance()->error("Socket creation failed: " +
@@ -12,7 +12,7 @@ Socket::Socket(int port) : port(port)
 
     try
     {
-        // Lambda for handling setsockopt calls
+        // lambda for handling setsockopt calls
         auto setSocketOption = [this](int level, int optname, const void *optval,
                                       socklen_t optlen, const char *errorMsg)
         {
@@ -23,24 +23,42 @@ Socket::Socket(int port) : port(port)
             }
         };
 
-        // Allow IPv4 connections on IPv6 socket (disable IPV6_V6ONLY)
+        // allow ipv4 connections on ipv6 socket
         int no = 0;
         setSocketOption(IPPROTO_IPV6, IPV6_V6ONLY, &no, sizeof(no),
                         "Failed to set IPV6_V6ONLY");
 
-        // Enable address and port reuse
+        // enable address and port reuse
         int opt = 1;
         setSocketOption(SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt),
                         "Failed to set SO_REUSEADDR | SO_REUSEPORT");
 
-        // Set send/receive buffer sizes for better performance
-        int bufSize = 1024 * 1024; // 1MB buffer
+        // enable tcp quickack for lower latency
+        setSocketOption(IPPROTO_TCP, TCP_QUICKACK, &opt, sizeof(opt),
+                        "Failed to set TCP_QUICKACK");
+
+        // enable busy polling for low latency
+        int busy_poll_usec = 50; // 50 microseconds
+        setSocketOption(SOL_SOCKET, SO_BUSY_POLL, &busy_poll_usec, sizeof(busy_poll_usec),
+                        "Failed to set SO_BUSY_POLL");
+
+        int bufSize = 2 * 1024 * 1024; // 2mb buffer
         setSocketOption(SOL_SOCKET, SO_RCVBUF, &bufSize, sizeof(bufSize),
                         "Failed to set SO_RCVBUF");
         setSocketOption(SOL_SOCKET, SO_SNDBUF, &bufSize, sizeof(bufSize),
                         "Failed to set SO_SNDBUF");
 
-        // Set non-blocking mode for epoll
+        // optimize tcp settings for high performance
+        int maxSeg = 1448; // optimal mss for ipv6
+        setSocketOption(IPPROTO_TCP, TCP_MAXSEG, &maxSeg, sizeof(maxSeg),
+                        "Failed to set TCP_MAXSEG");
+
+        // enable tcp fastopen for faster subsequent connections
+        int qlen = 5;
+        setSocketOption(SOL_TCP, TCP_FASTOPEN, &qlen, sizeof(qlen),
+                        "Failed to set TCP_FASTOPEN");
+
+        // set non-blocking mode for epoll
         int flags = fcntl(server_fd, F_GETFL, 0);
         if (flags == -1)
         {

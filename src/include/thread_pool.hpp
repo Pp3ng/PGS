@@ -12,7 +12,7 @@ private:
     // performance optimization constants
     static constexpr size_t QUEUE_SIZE = 1024; // must be power of 2
     static constexpr size_t MAX_STEAL_ATTEMPTS = 3;
-    static constexpr size_t SPIN_COUNT_MAX = 100;
+    static constexpr size_t SPIN_COUNT_MAX = 500;
 
     // lock-free queue implementation
     template <typename T>
