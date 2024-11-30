@@ -63,7 +63,6 @@ package "Data Structures" {
     + mimeType: string
     + lastModified: time_t
     + lruIterator: list<string>::iterator
-    + CacheEntry()
     + CacheEntry(const vector<char>&, const string&, time_t, list<string>::iterator)
     + template<typename Vector> CacheEntry(const Vector&, const string&,\n time_t, list<string>::iterator)
 }
@@ -82,7 +81,7 @@ package "Data Structures" {
 package "Core Components" {
     class Server <<Core>> {
         - socket: Socket
-        - ~Socket()
+        - ~Socket
         - router: Router
         - pool: ThreadPool
         - connectionsMutex: mutex
@@ -93,8 +92,8 @@ package "Core Components" {
         - cache: Cache
         - cacheCleanupThread: thread 
         + Server(int port, const string& staticFolder, int threadCount,\n int maxRequests, int timeWindow, int cacheSizeMB, int maxAgeSeconds)
-        + start(): void
-        + stop(): void
+        + start: void
+        + stop: void
         - handleClient(int client_socket, const string& clientIp): void
         - closeConnection(int client_socket): void
         - logRequest(int client_socket, const string& message): void
@@ -105,11 +104,11 @@ package "Core Components" {
         - server_fd: int
         - port: int
         + Socket(int port)
-        + bind(): void
-        + listen(): void
-        + closeSocket(): void
+        + bind: void
+        + listen: void
+        + closeSocket: void
         + acceptConnection(string& clientIp): int
-        + getSocketFd() const: int
+        + getSocketFd const: int
         + {static} durationToString(const chrono::steady_clock::duration& duration): string
     }
     note bottom of Socket: RAII wrapper for TCP socket operations\nwith dual-stack (IPv4/IPv6) support\nand connection management
@@ -132,7 +131,7 @@ package "Core Components" {
 
     + Router(const string& staticFolder)
     + route(const string& path, int client_socket,\n const string& clientIp, Middleware* middleware,\n Cache* cache): void
-    + getStaticFolder() const: string
+    + getStaticFolder const: string
     - getMimeType(const string& path): string
 }
     note right of Router: Handles routing of HTTP requests\nto appropriate static files\nwith MIME type detection\nand 404 handling
@@ -157,12 +156,12 @@ class ThreadPool <<Core>> {
     - dist: thread_local static uniform_int_distribution<size_t>
     
     + ThreadPool(size_t numThreads)
-    + ~ThreadPool()
+    + ~ThreadPool
     + ThreadPool(const ThreadPool&) = delete
     + ThreadPool& operator=(const ThreadPool&) = delete
     + template<typename F, typename... Args>\n enqueue(F&& f, Args&&... args): future<invoke_result_t<F, Args...>>
-    + stop(): void
-    + get_active_threads() const: size_t
+    + stop: void
+    + get_active_threads const: size_t
     + get_thread_tasks_processed(size_t) const: size_t
     
     - steal_task(function<void()>&, size_t): bool
@@ -213,7 +212,7 @@ class Logger <<Core>> {
     - {static} instance: unique_ptr<Logger>
     - {static} initFlag: once_flag
 
-    - Logger()
+    - Logger
     - processLogs(stop_token st): void
     - writeLogMessage(const LogMessage& msg): void
     - formatLogMessage(const LogMessage& msg): string
@@ -223,15 +222,15 @@ class Logger <<Core>> {
     - {static} formatWarning(const string& msg): string
     - {static} formatStep(int num, const string& msg): string
 
-    + {static} getInstance(): Logger*
-    + {static} destroyInstance(): void
+    + {static} getInstance: Logger*
+    + {static} destroyInstance: void
     + log(string_view message, LogLevel level = LogLevel::INFO, string_view ip = "-"): void
     + error(string_view message, string_view ip = "-"): void
     + warning(string_view message, string_view ip = "-"): void
     + success(string_view message, string_view ip = "-"): void
     + info(string_view message, string_view ip = "-"): void
     + step(int num, string_view message, string_view ip = "-"): void
-    + ~Logger()
+    + ~Logger
 }
 
     note right of Logger: Modern thread-safe singleton logger\nwith memory pool, shared mutex,\ncolor formatting and async logging\nusing jthread and stop tokens
@@ -241,14 +240,13 @@ class Logger <<Core>> {
 
     class EpollWrapper <<Core>> {
         - epoll_fd: int
-        + EpollWrapper()
-        + get() const: int
+        + EpollWrapper
+        + get const: int
         + wait(epoll_event* events, int maxEvents, int timeout): int
         + add(int fd, uint32_t events): bool
         + modify(int fd, uint32_t events): bool
         + remove(int fd): bool
         + template<typename Iterator>\n batch_operation(Iterator begin, Iterator end,\n int op, uint32_t events = 0): size_t
-        + is_monitored(int fd) const: bool
     }
     note right of EpollWrapper: RAII wrapper for Linux epoll API\nwith move semantics and\noptimized inline operations
 }
@@ -256,22 +254,22 @@ class Logger <<Core>> {
 package "Utility Classes" {
     abstract class Middleware <<Utility>> {
         + {abstract} process(const string& data): string
-        + virtual ~Middleware() = default
+        + {abstract} ~Middleware = default
     }
 
      class SocketOptionGuard <<Utility>> {
     - cork: int&
     - client_socket: int
     + SocketOptionGuard(int& c, int cs)
-    + ~SocketOptionGuard()
+    + ~SocketOptionGuard
 }
 
     class FileGuard <<Utility>> {
     - fd: int
-    + FileGuard()
+    + FileGuard
     + explicit FileGuard(int f)
-    + ~FileGuard()
-    + get() const: int
+    + ~FileGuard
+    + get const: int
     + reset(int f = -1): void
 }
 
@@ -279,24 +277,9 @@ package "Utility Classes" {
     - addr: void*
     - length: size_t
     + MMapGuard(void* a, size_t l)
-    + ~MMapGuard()
+    + ~MMapGuard
 }
 
-    class TerminalUtils <<Utility>> {
-        - {static} COLORS: array<const char*, 9>
-        - {static} BOLD: const char*
-        - {static} CHECK_MARK: const char*
-        - {static} CROSS_MARK: const char*
-        - {static} INFO_MARK: const char* 
-        - {static} WARN_MARK: const char*
-        + {static} success(const string& msg): string
-        + {static} error(const string& msg): string
-        + {static} info(const string& msg): string
-        + {static} warning(const string& msg): string
-        + {static} highlight(const string& msg): string
-        + {static} step(int num, const string& msg): string
-    }
-    note right of TerminalUtils: Provides terminal output formatting\nwith colors and symbols
 
 
     class Cache <<Utility>> {
@@ -310,21 +293,21 @@ package "Utility Classes" {
     + explicit Cache(size_t maxSizeMB, chrono::seconds maxAge)
     + template<typename Vector> get(const string& key, Vector& data,\n string& mimeType, time_t& lastModified): bool
     + template<typename Vector> set(const string& key, const Vector& data,\n const string& mimeType, time_t lastModified): void
-    + clear(): void
+    + clear: void
     + remove(const string& key): bool
     + exists(const string& key): bool
-    + size() const: size_t
-    + count() const: size_t
-    + getMaxAge() const: chrono::seconds
+    + size const: size_t
+    + count const: size_t
+    + getMaxAge const: chrono::seconds
     + setMaxAge(chrono::seconds newMaxAge): void
     - updateLRU(const string& key): void
-    - cleanExpiredEntries(): void 
-    + periodicCleanup(): void
+    - cleanExpiredEntries: void 
+    + periodicCleanup: void
 }
     note right of Cache: Thread-safe LRU cache implementation\nwith size-based eviction,\nTTL support, and memory optimization\nusing shared mutex for concurrent access
 
     class RateLimiter <<Utility>> {
-          + RateLimiter(size_t maxRequests, std::chrono::seconds timeWindow)
+        + RateLimiter(size_t maxRequests, std::chrono::seconds timeWindow)
         + std::string process(const std::string &data) override
         - const size_t maxTokens
         - const double refillRate
@@ -376,7 +359,6 @@ Middleware <|-- Compression : implements
 Router ..> Middleware : uses >
 
 Logger "1" *-- "0..*" LogMessage : contains >
-Logger ..> TerminalUtils : formats with >
 Server ..> Logger : logs through >
 Router ..> Logger : logs through >
 
