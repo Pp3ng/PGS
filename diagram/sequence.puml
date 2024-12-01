@@ -1,5 +1,4 @@
-@startuml server-sequence
-
+@startuml "server-sequence"
 scale 0.7
 skinparam responseMessageBelowArrow true
 skinparam maxMessageSize 150
@@ -12,22 +11,22 @@ end box
 
 box "Server Core Components" #LightBlue
 participant "Main" as main
-participant "ServerThread" as sthread
-participant "ShutdownThread" as shutdown
+participant "Parser" as parser
 participant "Server" as server
 participant "Logger" as logger
 participant "Socket" as socket
-participant "EpollWrapper" as epoll
-participant "ThreadPool" as pool
-participant "WorkerThread" as worker
 participant "Router" as router
+participant "ThreadPool" as pool
+participant "EpollWrapper" as epoll
 participant "Http" as http
 participant "Cache" as cache
 participant "RateLimiter" as limiter
 participant "Compression" as compression
+participant "CacheCleanupThread" as cleanup
 end box
 
 == Server Initialization ==
+
 [-> main: main()
 activate main
 
@@ -36,236 +35,245 @@ activate logger
 logger --> main: logger instance
 deactivate logger
 
-main -> Parser: parseConfig("pgs_conf.json")
-activate Parser
-Parser -> logger: info("Reading configuration")
-Parser -> Parser: validate configuration
-Parser -> logger: success("Configuration loaded")
-Parser --> main: Config object
-deactivate Parser
+main -> parser: parseConfig("pgs_conf.json")
+activate parser
+parser -> logger: info("Reading configuration from: " + configFilePath)
+parser -> parser: validateConfig()
+parser -> logger: success("Configuration loaded successfully")
+parser --> main: Config object
+deactivate parser
 
-main -> server: new Server(config)
+main -> server: new Server(port, staticFolder, threadCount,\n maxRequests, timeWindow, cacheSizeMB, maxAgeSeconds)
 activate server
+
+server -> logger: step(1, "Initializing server components...")
 
 server -> socket: new Socket(port)
 activate socket
-socket -> logger: info("Creating socket")
 socket -> socket: socket(AF_INET6, SOCK_STREAM, 0)
+socket -> logger: error() if failed
 socket -> socket: setSocketOptions()
-note right: SO_REUSEADDR | SO_REUSEPORT\nSO_SNDBUF | SO_RCVBUF
-socket -> socket: setNonBlocking()
-socket -> logger: success("Socket configured")
-socket --> server: socket ready
+socket --> server
 deactivate socket
+
+server -> router: new Router(staticFolder)
+activate router
+router -> logger: success("Router initialized with static folder: " + staticFolder)
+router --> server
+deactivate router
 
 server -> pool: new ThreadPool(threadCount)
 activate pool
-pool -> logger: info("Initializing thread pool")
-pool -> pool: initialize thread local data
-note right: Create per-thread work stealing queues
-
-create worker
-pool -> worker: start N worker threads
-activate worker
-
-worker -> worker: setThreadName("worker-N")
-worker -> worker: setThreadAffinity(N)
-
-loop until stop_flag
-    alt local_queue not empty
-        worker -> worker: process task from local queue
-    else try work stealing
-        loop for each other worker
-            worker -> worker: try_steal_task()
-            alt steal successful
-                worker -> worker: process stolen task
-                break
-            end
-        end
-    else try global queue
-        worker -> pool: try_pop from global_queue
-        alt got task
-            worker -> worker: process task
-        else
-            worker -> worker: sleep(100μs)
-        end
-    end
-end
-
-worker --> pool: worker ready
-deactivate worker
-
-pool -> logger: success("Thread pool ready")
-pool --> server: thread pool ready
+pool -> logger: success("thread pool initialized with " + threadCount + " threads")
+pool --> server
 deactivate pool
 
-== Main Event Loop ==
-server -> server: initializeTimeouts()
-note right: Pre-allocate vectors for\ntimeout tracking
+server -> limiter: new RateLimiter(maxRequests, std::chrono::seconds(timeWindow))
+limiter --> server
 
-server -> epoll: add(socket_fd, EPOLLIN)
-activate epoll
+server -> cache: new Cache(cacheSizeMB, std::chrono::seconds(maxAgeSeconds))
+cache --> server
+
+server -> server: startCacheCleanup()
+server -> logger: info("Server initialized")
+server --> main
+
+== Main Event Loop ==
+
+[-> server: start()
+activate server
+
+server -> server: startCacheCleanup()
+activate server
+create cleanup
+server -> cleanup: start thread
+note right: pthread_setname_np("cache-cleanup")\nnice(10)
+deactivate server
+
+server -> epoll: add(socket.getSocketFd(), EPOLLIN | EPOLLET)
 
 loop until shouldStop
-    epoll -> epoll: wait(events, MAX_EVENTS, 100ms)
-    
-    alt new connection
-        server -> socket: acceptConnection()
+    server -> epoll: wait(events, MAX_EVENTS, 50ms)
+    activate epoll
+    epoll --> server: nfds
+    deactivate epoll
+
+    alt new connection (events[i].data.fd == socket_fd)
+        server -> socket: acceptConnection(clientIp)
         activate socket
-        socket -> socket: accept()
-        socket -> socket: setNonBlocking()
-        socket -> logger: success("New connection")
-        socket --> server: client_socket
-        deactivate socket
-        
-        server -> epoll: add(client_socket, EPOLLIN | EPOLLET)
-        
-    else existing connection
-        server -> pool: enqueue(handleClient)
-        activate worker
-        
-        worker -> server: handleClient()
-        activate server
-        
-        server -> server: readRequest()
-        
-        alt valid request
-            server -> Http: parseRequest()
-            activate http
-            http -> router: route()
-            activate router
-            
-            router -> cache: tryGet()
-            alt cache hit
-                cache --> router: cached response
-                router -> compression: compress()
-                router -> client: send response
-            else cache miss
-                router -> router: processRequest()
-                router -> compression: compress()
-                router -> cache: store()
-                router -> client: send response
-            end
-            
-            deactivate router
-            deactivate http
+        socket -> socket: accept4(SOCK_NONBLOCK | SOCK_CLOEXEC)
+        alt accept successful
+            socket -> logger: success("New connection accepted from " + clientIp)
+            socket --> server: client_socket
+            server -> epoll: add(client_socket, EPOLLIN | EPOLLET)
+        else accept failed
+            socket -> logger: error("Failed to accept connection: " + error)
+            socket --> server: -1
         end
-        
-        server -> logger: info("Request completed")
-        deactivate server
-        deactivate worker
+        deactivate socket
+
+    else existing connection
+        alt event & EPOLLIN
+            server -> pool: enqueue([this, client_socket, clientIp] { handleClient(client_socket, clientIp); })
+        else event & (EPOLLHUP | EPOLLRDHUP | EPOLLERR)
+            server -> server: closeConnection(client_socket)
+        end
+    end
+
+    alt now - lastTimeoutCheck > TIMEOUT_CHECK_INTERVAL
+        server -> server: checkTimeouts()
+        note right: Close idle connections\nafter 20 seconds
     end
 end
 
-== Request Processing ==
-server -> worker: handleClient()
-activate worker
-
-worker -> server: handleClient(socket, ip)
+pool -> server: handleClient(client_socket, clientIp)
 activate server
 
-server -> server: readRequest()
-
-server -> Http: parseRequest()
+server -> http: getRequestPath(request)
 activate http
+http --> server: path
+deactivate http
 
-http -> router: route()
+server -> router: route(path, client_socket, clientIp, &rateLimiter, &cache, request)
 activate router
 
-router -> cache: tryGet()
-alt cache hit
-    cache --> router: cached response
-    router -> compression: compress()
-    activate compression
-    compression --> router: compressed data
-    deactivate compression
-    
-    router -> client: send response
-else cache miss
-    router -> router: processRequest()
-    
-    router -> compression: compress()
-    activate compression
-    compression --> router: compressed data
-    deactivate compression
-    
-    router -> cache: store()
-    router -> client: send response
-end
-
+router -> http: isAssetRequest(path)
+activate http
+http --> router: isAsset
 deactivate http
+
+router -> router: getMimeType(path)
+activate router
+note right: Check file extension and\nreturn corresponding MIME type
 deactivate router
 
-server -> logger: info("Request completed")
+alt file exists
+    router -> http: sendResponse(client_socket, filePath, mimeType, 200, clientIp,\n!isAsset && isIndex, middleware, cache, request)
+    activate http
+    
+    http -> http: checkClientCache(request, lastModified)
+    alt client cache valid
+        http -> client: "304 Not Modified"
+        http -> logger: info("304 Not Modified sent")
+    else need to send content
+        http -> http: setupSocketOptions(client_socket, cork, clientIp)
+        
+        http -> cache: get(filePath, data, mimeType, lastModified)
+        alt cache hit
+            cache -> cache: updateLRU(key)
+            note right
+                1. Remove from current position
+                2. Push to front of LRU list
+                3. Update iterator
+            end note
+            cache --> http: cached content
+        else cache miss
+            http -> http: handleFileContent(fileGuard, filePath, fileSize, lastModified, clientIp)
+            
+            alt should compress
+                http -> compression: shouldCompress(mimeType, fileSize)
+                compression -> compression: process(content)
+                activate compression
+                compression -> compression: compressData(data)
+                note right
+                    Initialize zlib with:
+                    1. Z_DEFAULT_COMPRESSION
+                    2. Z_DEFLATED
+                    3. 15 | 16 for gzip
+                    4. 8 window bits
+                    5. Z_DEFAULT_STRATEGY
+                end note
+                compression --> http: compressed data
+                deactivate compression
+            end
+            
+            http -> cache: set(std::move(key), std::move(data),\nstd::move(mimeType), lastModified)
+        end
+        
+        http -> http: generateHeaders(statusCode, mimeType, fileSize, lastModified, isCompressed)
+        
+        alt fileSize < BUFFER_SIZE
+            http -> http: sendWithWritev()
+        else
+            alt supports sendfile
+                http -> http: sendWithSendfile()
+            else supports mmap
+                http -> http: sendWithMmap()
+            else
+                http -> http: sendWithRead()
+            end
+        end
+        
+        http -> logger: info("Response sent: " + std::to_string(bytesSent) + " bytes")
+    end
+    deactivate http
+else file not found
+    router -> http: sendResponse(client_socket, "404 Not Found", "text/plain", 404, clientIp)
+end
+
+deactivate router
 deactivate server
-deactivate worker
 
 == Server Shutdown ==
-[-> main: SIGINT/SIGTERM
-main -> shutdown: create & set priority(-10)
-activate shutdown
 
-shutdown -> server: stop()
+[-> main: SIGINT/SIGTERM
+activate main
+
+main -> server: stop()
 activate server
 
 server -> logger: warning("Initiating shutdown")
-server -> shouldStop: set true
-server -> socket: closeSocket()
+server -> server: shouldStop = true
+
+server -> cleanup: notify cleanup thread
+activate cleanup
+cleanup -> cache: periodicCleanup()
+cleanup --> server: cleanup thread terminated
+deactivate cleanup
+
 server -> pool: stop()
+activate pool
+pool -> pool: stop_flag = true
+pool -> pool: condition.notify_all()
 
-pool -> worker: notify all workers
-worker -> worker: finish remaining tasks
-worker --> pool: workers terminated
-
-server -> server: collectSocketsToClose()
-
-alt connections > PARALLEL_THRESHOLD
-    server -> server: parallelClose()
-    
-    create "CloseThread[N]" as closeThread
-    server -> closeThread: start N threads
-    activate closeThread
-    
-    loop for each thread
-        closeThread -> server: closeConnection(chunk)
-        activate server
-        
-        server -> server: lock & update stats
-        server -> epoll: remove(socket)
-        server -> socket: close()
-        server -> logger: info("Connection closed")
-        
-        server --> closeThread
-        deactivate server
-    end
-    
-    closeThread --> server: all connections closed
-    deactivate closeThread
-    
-else
-    loop for each socket
-        server -> server: closeConnection()
-        activate server
-        server -> server: lock & update stats
-        server -> epoll: remove(socket)
-        server -> socket: close()
-        server -> logger: info("Connection closed")
-        deactivate server
-    end
+loop for each worker thread
+    pool -> pool: worker.join()
 end
 
-server -> logger: info("All connections closed")
-server --> shutdown: shutdown complete
-deactivate server
+pool -> pool: clear queues
+pool --> server
+deactivate pool
 
-shutdown --> main: server stopped
-deactivate shutdown
+server -> socket: closeSocket()
+activate socket
+socket -> socket: close(server_fd)
+socket -> logger: info("Server socket closed")
+socket --> server
+deactivate socket
+
+loop for each client connection
+    server -> server: closeConnection(client_socket)
+    activate server
+    server -> logger: info("Connection closed: " + clientIp)
+    deactivate server
+end
+
+server -> logger: success("Server shutdown complete")
+server --> main
+deactivate server
 
 main -> logger: destroyInstance()
 activate logger
-logger -> logger: flush logs
-logger -> logger: close file
-logger --> main: logger destroyed
+
+logger -> logger: running = false
+logger -> logger: queueCV.notify_all()
+
+alt logFile.is_open()
+    logger -> logger: logFile.close()
+end
+
+logger -> logger: loggerThread.join()
+logger --> main
 deactivate logger
 
 [<-- main: exit(0)
