@@ -1,6 +1,12 @@
 # PGS: C++ HTTP Static File Server
 
+<div align="center">
+
 PGS (Pp3ng's Server) is a C++-based, multi-threaded HTTP static file server designed for efficient performance. It uses epoll for I/O multiplexing and a thread pool for handling requests concurrently. PGS supports features like MIME type detection, directory indexing, and JSON-based configuration. It's lightweight design and focus on simplicity.
+
+[![wakatime](https://wakatime.com/badge/user/018b0b2d-ab3f-4d4d-941c-c52b8275e363/project/da1d3236-00d6-438d-8a99-1a07df207bca.svg)](https://wakatime.com/badge/user/018b0b2d-ab3f-4d4d-941c-c52b8275e363/project/da1d3236-00d6-438d-8a99-1a07df207bca)
+
+</div>
 
 ## Architecture Overview
 
@@ -139,7 +145,7 @@ The server will:
 ### Socket Handling
 
 - Non-blocking sockets with epoll for I/O multiplexing
-- SO_REUSEADDR option enabled and more socket options for performance 
+- SO_REUSEADDR option enabled and more socket options for performance
 - IPv6 support (dual-stack)
 
 ### Router Features
