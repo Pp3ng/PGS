@@ -7,14 +7,16 @@ class EpollWrapper
 {
 public:
     // constructor with minimal but essential error handling
-    EpollWrapper() : epoll_fd(epoll_create1(EPOLL_CLOEXEC)),
-                     fd_status(new std::atomic<bool>[MAX_FDS])
+    EpollWrapper() : epoll_fd(epoll_create1(EPOLL_CLOEXEC))
     {
         if (epoll_fd == -1)
         {
             throw std::system_error(errno, std::system_category(),
                                     "Failed to create epoll file descriptor");
         }
+        
+        // Initialize bitset for efficient fd tracking
+        fd_status.reset();
     }
     ~EpollWrapper() noexcept
     {
@@ -28,7 +30,7 @@ public:
 
     // optimized move operations
     inline EpollWrapper(EpollWrapper &&other) noexcept
-        : epoll_fd(other.epoll_fd)
+        : epoll_fd(other.epoll_fd), fd_status(std::move(other.fd_status))
     {
         other.epoll_fd = -1;
     }
@@ -41,6 +43,7 @@ public:
             if (epoll_fd != -1)
                 close(epoll_fd);
             epoll_fd = std::exchange(other.epoll_fd, -1);
+            fd_status = std::move(other.fd_status);
         }
         return *this;
     }
@@ -62,14 +65,20 @@ public:
         if (static_cast<size_t>(fd) >= MAX_FDS)
             return false;
 
-        bool expected = false;
-        if (!fd_status[fd].compare_exchange_strong(expected, true))
-            return true;
+        // Use bitset for efficient status tracking
+        if (fd_status.test(fd))
+            return true; // already added
 
         struct epoll_event ev;
         ev.events = events;
         ev.data.fd = fd;
-        return epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &ev) == 0;
+        
+        if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &ev) == 0)
+        {
+            fd_status.set(fd);
+            return true;
+        }
+        return false;
     }
 
     [[nodiscard]] inline bool modify(int fd,
@@ -84,15 +93,18 @@ public:
 
     [[nodiscard]] inline bool remove(int fd) noexcept // remove fd from epoll set with optimized error handling
     {
-
         if (static_cast<size_t>(fd) >= MAX_FDS)
             return false;
 
-        bool expected = true;
-        if (!fd_status[fd].compare_exchange_strong(expected, false))
-            return true;
+        if (!fd_status.test(fd))
+            return true; // already removed
 
-        return epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, nullptr) == 0;
+        if (epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, nullptr) == 0)
+        {
+            fd_status.reset(fd);
+            return true;
+        }
+        return false;
     }
 
     template <typename Iterator>
@@ -126,6 +138,18 @@ public:
                 continue;
             }
 
+            // skip if already in desired state
+            if (op == EPOLL_CTL_ADD && fd_status.test(fd))
+            {
+                ++success_count;
+                continue;
+            }
+            if (op == EPOLL_CTL_DEL && !fd_status.test(fd))
+            {
+                ++success_count;
+                continue;
+            }
+
             // prepare event structure
             if (op != EPOLL_CTL_DEL)
             {
@@ -139,16 +163,17 @@ public:
             {
                 ++success_count;
 
-                // update fd status for non-delete operations
-                if (op != EPOLL_CTL_DEL && static_cast<size_t>(fd) < MAX_FDS)
-                {
-                    fd_status[fd].store(true, std::memory_order_release);
-                }
+                // update fd status efficiently
+                if (op == EPOLL_CTL_ADD)
+                    fd_status.set(fd);
+                else if (op == EPOLL_CTL_DEL)
+                    fd_status.reset(fd);
             }
             else if (errno != EBADF && errno != ENOENT)
             {
                 // store failed fd for retry if error is recoverable
-                failed_fds[failed_count++] = fd;
+                if (failed_count < BATCH_SIZE)
+                    failed_fds[failed_count++] = fd;
             }
 
             // reset batch counter when reaching batch size
@@ -159,41 +184,40 @@ public:
         }
 
         // retry failed operations once
-        if (failed_count > 0)
+        for (size_t i = 0; i < failed_count; ++i)
         {
-            for (size_t i = 0; i < failed_count; ++i)
+            const int fd = failed_fds[i];
+            struct epoll_event ev;
+            ev.events = events;
+            ev.data.fd = fd;
+
+            if (epoll_ctl(epoll_fd, op, fd,
+                          (op == EPOLL_CTL_DEL) ? nullptr : &ev) == 0)
             {
-                const int fd = failed_fds[i];
-                struct epoll_event ev;
-                ev.events = events;
-                ev.data.fd = fd;
+                ++success_count;
 
-                if (epoll_ctl(epoll_fd, op, fd,
-                              (op == EPOLL_CTL_DEL) ? nullptr : &ev) == 0)
-                {
-                    ++success_count;
-
-                    if (op != EPOLL_CTL_DEL && static_cast<size_t>(fd) < MAX_FDS)
-                    {
-                        fd_status[fd].store(true, std::memory_order_release);
-                    }
-                }
+                if (op == EPOLL_CTL_ADD)
+                    fd_status.set(fd);
+                else if (op == EPOLL_CTL_DEL)
+                    fd_status.reset(fd);
             }
         }
 
         return success_count;
     }
+    
     [[nodiscard]] inline bool
     is_monitored(int fd) const noexcept // check if fd is monitored by epoll
     {
-        struct epoll_event ev;
-        return epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) != -1 || errno != ENOENT;
+        if (static_cast<size_t>(fd) >= MAX_FDS)
+            return false;
+        return fd_status.test(fd);
     }
 
 private:
     int epoll_fd;                                   // epoll file descriptor
     static constexpr size_t MAX_FDS = 65536;        // maximum number of file descriptors
-    std::unique_ptr<std::atomic<bool>[]> fd_status; // status of file descriptors
+    std::bitset<MAX_FDS> fd_status;                 // efficient fd status tracking using bitset
 
     // Static assertions for compile-time checks
     static_assert(

@@ -42,6 +42,7 @@ private:
     // helper function to update LRU order - O(1) operation
     void updateLRU(const std::string &key);
     void cleanExpiredEntries();
+    void batchUpdateLRU(const std::vector<std::string>& keys);
 
 public:
     // constructor with overflow check - O(1)

@@ -5,6 +5,7 @@
 #include <algorithm>          // efficient algorithms
 #include <array>              // fixed-size arrays
 #include <atomic>             // atomic operations
+#include <bitset>             // bitset operations
 #include <chrono>             // measuring time
 #include <condition_variable> // blocking thread synchronization
 #include <deque>              // double-ended queue

@@ -21,7 +21,11 @@ Cache::CacheEntry::CacheEntry(Vector &&d, std::string &&m, time_t lm,
 template <typename Vector>
 bool Cache::get(const std::string &key, Vector &data, std::string &mimeType, time_t &lastModified)
 {
-    std::shared_lock<std::shared_mutex> readLock(mutex);
+    static thread_local std::vector<std::string> lru_update_batch;
+    static thread_local std::chrono::steady_clock::time_point last_lru_update =
+        std::chrono::steady_clock::now();
+
+    std::shared_lock<std::shared_mutex> lock(mutex);
 
     auto it = cache.find(key);
     if (it == cache.end())
@@ -29,7 +33,7 @@ bool Cache::get(const std::string &key, Vector &data, std::string &mimeType, tim
         return false;
     }
 
-    // copy the cached data and metadata first
+    // copy the cached data and metadata
     try
     {
         data.reserve(it->second.data.size());
@@ -43,25 +47,43 @@ bool Cache::get(const std::string &key, Vector &data, std::string &mimeType, tim
         return false;
     }
 
-    // update LRU list under exclusive lock
-    readLock.unlock();
-    std::unique_lock<std::shared_mutex> writeLock(mutex);
+    // Batch LRU update
+    const auto now = std::chrono::steady_clock::now();
+    constexpr auto LRU_BATCH_INTERVAL = std::chrono::milliseconds(100);
 
-    // re-check if entry still exists after lock switch
-    it = cache.find(key);
-    if (it != cache.end())
+    if (lru_update_batch.size() < 32 &&
+        now - last_lru_update < LRU_BATCH_INTERVAL)
     {
-        // move entry to front of LRU list
-        lruList.erase(it->second.lruIterator);
-        lruList.push_front(key);
-        it->second.lruIterator = lruList.begin();
+        lru_update_batch.emplace_back(key);
         return true;
     }
 
-    return false;
+    // Process batch updates
+    lock.unlock();
+    std::unique_lock<std::shared_mutex> writeLock(mutex);
+
+    // Add current key to batch
+    lru_update_batch.emplace_back(key);
+
+    // Batch update LRU for all keys
+    for (const auto &batchKey : lru_update_batch)
+    {
+        auto batchIt = cache.find(batchKey);
+        if (batchIt != cache.end())
+        {
+            lruList.erase(batchIt->second.lruIterator);
+            lruList.push_front(batchKey);
+            batchIt->second.lruIterator = lruList.begin();
+        }
+    }
+
+    lru_update_batch.clear();
+    last_lru_update = now;
+
+    return true;
 }
 
-// add an item to cache - o(1) average case
+// add an item to cache - o(1) average cass
 template <typename Vector>
 void Cache::set(std::string &&key, Vector &&data, std::string &&mimeType, time_t lastModified)
 {
@@ -72,11 +94,8 @@ void Cache::set(std::string &&key, Vector &&data, std::string &&mimeType, time_t
 
     std::unique_lock<std::shared_mutex> lock(mutex);
 
-    // store key copy for lookup
-    const std::string keyCopy = key;
-
     // remove existing entry if present
-    auto it = cache.find(keyCopy);
+    auto it = cache.find(key);
     if (it != cache.end())
     {
         currentSize -= it->second.data.size();
@@ -101,6 +120,9 @@ void Cache::set(std::string &&key, Vector &&data, std::string &&mimeType, time_t
     // add new entry
     try
     {
+        // create key copy only once for LRU list
+        const std::string keyCopy = key;
+
         // add to lru first
         lruList.push_front(keyCopy);
         auto lruIt = lruList.begin();

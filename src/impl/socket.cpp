@@ -30,19 +30,21 @@ Socket::Socket(int port) : port(port)
 
         // enable address and port reuse
         int opt = 1;
-        setSocketOption(SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt),
-                        "Failed to set SO_REUSEADDR | SO_REUSEPORT");
+        setSocketOption(SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt),
+                        "Failed to set SO_REUSEADDR");
+        setSocketOption(SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt),
+                        "Failed to set SO_REUSEPORT");
 
         // enable tcp quickack for lower latency
         setSocketOption(IPPROTO_TCP, TCP_QUICKACK, &opt, sizeof(opt),
                         "Failed to set TCP_QUICKACK");
 
-        // enable busy polling for low latency
-        int busy_poll_usec = 50; // 50 microseconds
+        // enable busy polling
+        int busy_poll_usec = 10; // 10 microseconds
         setSocketOption(SOL_SOCKET, SO_BUSY_POLL, &busy_poll_usec, sizeof(busy_poll_usec),
                         "Failed to set SO_BUSY_POLL");
 
-        int bufSize = 2 * 1024 * 1024; // 2mb buffer
+        int bufSize = 4 * 1024 * 1024; // 4mb buffer size
         setSocketOption(SOL_SOCKET, SO_RCVBUF, &bufSize, sizeof(bufSize),
                         "Failed to set SO_RCVBUF");
         setSocketOption(SOL_SOCKET, SO_SNDBUF, &bufSize, sizeof(bufSize),
@@ -124,8 +126,6 @@ void Socket::closeSocket()
 
 int Socket::acceptConnection(std::string &clientIp)
 {
-    // use thread local buffer to avoid repeated allocation
-    static thread_local char ipstr[INET6_ADDRSTRLEN];
     struct sockaddr_in6 address;
     socklen_t addrlen = sizeof(address);
 
@@ -140,9 +140,13 @@ int Socket::acceptConnection(std::string &clientIp)
         // convert ip address to string format
         if (address.sin6_family == AF_INET6)
         {
+            static thread_local char ipstr[INET6_ADDRSTRLEN];
             inet_ntop(AF_INET6, &address.sin6_addr, ipstr, sizeof(ipstr));
             clientIp = ipstr;
-            Logger::getInstance()->success("New connection accepted from " + clientIp);
+        }
+        else
+        {
+            clientIp = "unknown";
         }
         return new_socket;
     }

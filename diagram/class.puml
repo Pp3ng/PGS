@@ -233,11 +233,6 @@ class Logger <<Core>> {
     + ~Logger
 }
 
-    note right of Logger: Modern thread-safe singleton logger\nwith memory pool, shared mutex,\ncolor formatting and async logging\nusing jthread and stop tokens
-
-
-
-
     class EpollWrapper <<Core>> {
         - epoll_fd: int
         + EpollWrapper

@@ -32,6 +32,23 @@ void Cache::updateLRU(const std::string &key)
     cache[key].lruIterator = lruList.begin(); // update iterator
 }
 
+// batch update LRU for performance optimization
+void Cache::batchUpdateLRU(const std::vector<std::string>& keys)
+{
+    std::unique_lock<std::shared_mutex> lock(mutex);
+    
+    for (const auto& key : keys)
+    {
+        auto it = cache.find(key);
+        if (it != cache.end())
+        {
+            lruList.erase(it->second.lruIterator);
+            lruList.push_front(key);
+            it->second.lruIterator = lruList.begin();
+        }
+    }
+}
+
 void Cache::cleanExpiredEntries()
 {
     std::unique_lock<std::shared_mutex> lock(mutex);

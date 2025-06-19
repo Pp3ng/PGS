@@ -56,19 +56,17 @@ private:
                                                      const std::string &mimeType,
                                                      size_t fileSize, time_t lastModified,
                                                      bool isCompressed);
-    [[nodiscard]] static size_t sendWithWritev(int client_socket, const std::string &headerStr,
-                                               const std::pmr::string &compressedContent,
-                                               const std::pmr::vector<char> &fileContent,
-                                               bool isCompressed, bool cacheHit,
-                                               const std::string &clientIp);
-    [[nodiscard]] static size_t sendLargeFile(int client_socket, const FileGuard &fileGuard,
-                                              size_t fileSize, const std::string &clientIp);
-    [[nodiscard]] static size_t sendWithSendfile(int client_socket, const FileGuard &fileGuard,
-                                                 size_t fileSize, const std::string &clientIp);
-    [[nodiscard]] static size_t sendWithRead(int client_socket, const FileGuard &fileGuard,
-                                             size_t fileSize, const std::string &clientIp);
-    [[nodiscard]] static size_t sendWithMmap(int client_socket, const FileGuard &fileGuard,
-                                             size_t fileSize, const std::string &clientIp);
+
+    // Unified sending methods
+    [[nodiscard]] static size_t sendUnified(int client_socket, const std::string &headerStr,
+                                            const std::pmr::vector<char> &content,
+                                            const std::string &clientIp);
+    [[nodiscard]] static size_t sendUnified(int client_socket, const std::string &headerStr,
+                                            const FileGuard &fileGuard, size_t fileSize,
+                                            const std::string &clientIp, bool isImage = false);
+    [[nodiscard]] static bool readFileToMemory(const FileGuard &fileGuard, size_t fileSize,
+                                               std::pmr::vector<char> &content,
+                                               std::pmr::monotonic_buffer_resource &pool);
     [[nodiscard]] static bool checkClientCache(const std::string &request,
                                                time_t lastModified);
     [[nodiscard]] static bool handleClientCache(int client_socket,
